@@ -16,7 +16,7 @@ type RawMake = {
   make_id: number
   make_name: string
   make_slug: string
-  models: Record<string, RawModel>
+  models: Record<string, RawModel | undefined>
 }
 
 const buildVehicleData = (rawMakes: RawMake[]): VehicleData => {
@@ -26,6 +26,9 @@ const buildVehicleData = (rawMakes: RawMake[]): VehicleData => {
     const makeName = make.make_name
     const models = Object.values(make.models ?? {})
     for (const model of models) {
+      if (!model) {
+        continue
+      }
       const modelName = model.model_name
       for (const year of model.years ?? []) {
         const yearKey = String(year)
