@@ -17,6 +17,8 @@ interface ClaimFormProps {
   onSubmit: (data: ClaimFormData) => void
 }
 
+const VIN_DECODING_ENABLED = false
+
 const initialState: ClaimFormData = {
   claimId: '',
   policyholderName: '',
@@ -96,6 +98,11 @@ export default function ClaimForm({ onSubmit }: ClaimFormProps) {
   }
 
   const handleVinLookup = async () => {
+    if (!VIN_DECODING_ENABLED) {
+      setVinStatus('error')
+      setVinMessage('VIN decoding is disabled in this prototype.')
+      return
+    }
     const vin = formData.vin.trim().toUpperCase()
     if (vin.length < 11) {
       setVinStatus('error')
@@ -171,7 +178,7 @@ export default function ClaimForm({ onSubmit }: ClaimFormProps) {
             type="button"
             className="button button--ghost"
             onClick={handleVinLookup}
-            disabled={vinStatus === 'loading'}
+            disabled={vinStatus === 'loading' || !VIN_DECODING_ENABLED}
           >
             {vinStatus === 'loading' ? 'Decoding...' : 'Decode VIN'}
           </button>
