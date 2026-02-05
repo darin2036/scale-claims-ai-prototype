@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import fenderbenderLogo from './assets/fenderbender-logo.png'
 import PhotoChecklistUploader, {
   type ChecklistPhotos,
   type PhotoKey,
@@ -804,8 +805,8 @@ function App() {
     ? `${vehicleResult.year} ${vehicleResult.make} ${vehicleResult.model}`
     : 'Not identified yet'
   const policyLabel = policyHolder
-    ? `${policyHolder.policy.coverage} coverage, deductible $${policyHolder.policy.deductible}`
-    : 'Policy not loaded'
+    ? `FenderBender Mutual - ${policyHolder.policy.coverage} coverage, deductible $${policyHolder.policy.deductible}`
+    : 'FenderBender Mutual - Policy not loaded'
   const policyholderName = policyHolder?.name ?? 'Policyholder'
   const policyholderPhone = policyHolder ? '(555) 018-2471' : 'Not available'
   const claimLabel = claimRecord?.claimId ?? 'Not submitted yet'
@@ -1066,6 +1067,7 @@ function App() {
   return (
     <div className="app">
       <main className="app__shell">
+        <p className="muted">FenderBender Mutual</p>
         <div className="app__reset">
           <button type="button" className="link-button" onClick={handleRestart}>
             Start workflow over
@@ -1085,6 +1087,17 @@ function App() {
             Insurer view
           </button>
         </div>
+        <header className="app__brand">
+          <img
+            src={fenderbenderLogo}
+            alt="FenderBender Mutual logo"
+            className="app__brandLogo"
+          />
+          <div className="app__brandText">
+            <span className="app__brandName">FenderBender Mutual</span>
+            <span className="app__brandTag">Claim Assist</span>
+          </div>
+        </header>
         <ProgressHeader
           currentStep={currentStep}
           totalSteps={TOTAL_STEPS}
@@ -1653,6 +1666,7 @@ function App() {
             {currentStep === 7 && (
               <div className="form-grid">
                 <div className="support callout">
+                  <div className="ai-sparkle" />
                   <p className="support__headline">We are analyzing your photos.</p>
                   <p className="muted">A few quick checks in progress...</p>
                 </div>
