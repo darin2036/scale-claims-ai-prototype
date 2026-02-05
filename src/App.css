@@ -16,6 +16,13 @@
   width: 100%;
 }
 
+.app__reset {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .progress-header {
   background: rgba(255, 255, 255, 0.85);
   border-radius: 20px;
@@ -73,11 +80,13 @@
 .panel--step {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .panel__body {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .panel__footer {
@@ -259,6 +268,7 @@
   background: #fff;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   min-height: 44px;
+  width: 100%;
 }
 
 .field__inline {
@@ -288,6 +298,7 @@
   padding: 16px;
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .field-group legend {
@@ -459,6 +470,7 @@
   border-radius: 16px;
   border: 1px solid var(--border);
   background: #fff;
+  min-width: 0;
 }
 
 .preview-card__image {
@@ -485,6 +497,26 @@
   color: var(--muted);
   font-size: 0.85rem;
   overflow-wrap: anywhere;
+}
+
+.enterprise-logo {
+  max-width: 180px;
+  height: auto;
+  object-fit: contain;
+}
+
+.ride-logo {
+  max-width: 36px;
+  height: 20px;
+  object-fit: contain;
+  margin-left: auto;
+}
+
+.ride-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
 }
 
 .extraction-card {
@@ -516,6 +548,7 @@
   border-radius: 16px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
+  min-width: 0;
 }
 
 .summary--compact {
@@ -534,6 +567,7 @@
 .summary__value {
   font-weight: 600;
   color: var(--ink);
+  overflow-wrap: anywhere;
 }
 
 .summary__value.text-success {
@@ -788,6 +822,7 @@
     align-items: stretch;
     position: sticky;
     bottom: 0;
+    z-index: 30;
   }
 
   .stepper-actions {

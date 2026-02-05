@@ -56,7 +56,7 @@ export default function EstimateBreakdown({ vehicle, assessment, policy }: Estim
 
       {lowConfidence && (
         <div className="callout callout--warn">
-          Low confidence — recommend manual review or request more photos.
+          Low confidence - recommend manual review or request more photos.
         </div>
       )}
 

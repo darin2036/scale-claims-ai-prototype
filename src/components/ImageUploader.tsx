@@ -36,7 +36,7 @@ export default function ImageUploader({ disabled, onFileSelected }: ImageUploade
         <input
           className="upload__input"
           type="file"
-          accept="image/*"
+          accept="image/*,.heic,.heif"
           onChange={handleFileChange}
           disabled={disabled}
         />
@@ -56,7 +56,7 @@ export default function ImageUploader({ disabled, onFileSelected }: ImageUploade
             <span className="preview-card__title">Uploaded damage photo</span>
             {fileMeta && (
               <span className="preview-card__details">
-                {fileMeta.name} · {(fileMeta.size / 1024).toFixed(0)} KB
+                {fileMeta.name} - {(fileMeta.size / 1024).toFixed(0)} KB
               </span>
             )}
           </div>

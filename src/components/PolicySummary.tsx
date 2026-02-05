@@ -57,7 +57,7 @@ export default function PolicySummary({
             <span>Customer pays: ${customerPays}</span>
             <span>Insurer pays: ${insurerPays}</span>
           </div>
-          <p className="muted">Preliminary estimate — final cost depends on shop inspection.</p>
+          <p className="muted">Preliminary estimate - final cost depends on shop inspection.</p>
         </div>
       )}
     </div>
