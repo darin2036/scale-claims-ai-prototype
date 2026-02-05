@@ -29,6 +29,16 @@ const pickScenarioBySeed = (seed: string) => {
 const normalizePlate = (plate: string) => plate.trim().toUpperCase()
 const normalizeState = (state: string) => state.trim().toUpperCase()
 const normalizeVin = (vin: string) => vin.trim().toUpperCase()
+const normalizeIdentifierInput = (input: string) => input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+
+export function normalizeIdentifier(input: string): { kind: 'vin' | 'plate'; vin?: string; plate?: string } {
+  const normalized = normalizeIdentifierInput(input)
+  const isVin = /^[A-HJ-NPR-Z0-9]{17}$/.test(normalized)
+  if (isVin) {
+    return { kind: 'vin', vin: normalized }
+  }
+  return { kind: 'plate', plate: normalized }
+}
 
 export async function listDemoScenarios(): Promise<{ id: string; label: string }[]> {
   return withLatency('list-scenarios', () =>
@@ -71,6 +81,24 @@ export async function lookupVehicleByVin(vin: string): Promise<Vehicle> {
       : pickScenarioBySeed(normalizedVin)
     return (scenario ?? demoScenarios[0]).vehicle
   })
+}
+
+export async function lookupVehicleByIdentifier(args: {
+  state?: string
+  identifier: string
+}): Promise<Vehicle> {
+  const normalized = normalizeIdentifier(args.identifier)
+  if (normalized.kind === 'vin') {
+    return await lookupVehicleByVin(normalized.vin ?? '')
+  }
+
+  const state = args.state?.trim()
+  if (!state) {
+    return withLatency(`identifier-missing-state-${args.identifier}`, () => {
+      throw new Error('State is required for plate lookup.')
+    })
+  }
+  return await lookupVehicleByPlateState(state, normalized.plate ?? '')
 }
 
 const buildExtractionNotes = (confidence: number, blurry: boolean) => {

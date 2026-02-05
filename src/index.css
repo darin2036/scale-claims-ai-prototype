@@ -30,6 +30,8 @@ body {
   font-family: 'Manrope', 'Segoe UI', sans-serif;
   background: var(--bg);
   color: var(--ink);
+  line-height: 1.55;
+  -webkit-text-size-adjust: 100%;
 }
 
 h1,
@@ -44,4 +46,9 @@ input,
 select,
 textarea {
   font-family: inherit;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
 }
