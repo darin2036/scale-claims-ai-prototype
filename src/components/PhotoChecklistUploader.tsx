@@ -14,6 +14,7 @@ interface PhotoChecklistUploaderProps {
   photos: ChecklistPhotos
   onPhotoChange: (key: PhotoKey, file: PhotoValue) => void
   includeOtherInsurance?: boolean
+  visibleKeys?: PhotoKey[]
 }
 
 const SLOT_CONFIG: Array<{
@@ -49,13 +50,20 @@ export default function PhotoChecklistUploader({
   photos,
   onPhotoChange,
   includeOtherInsurance = true,
+  visibleKeys,
 }: PhotoChecklistUploaderProps) {
   return (
     <div className="checklist">
       <div className="checklist__grid">
-        {SLOT_CONFIG.filter((slot) =>
-          slot.key === 'otherInsurancePhoto' ? includeOtherInsurance : true,
-        ).map((slot) => {
+        {SLOT_CONFIG.filter((slot) => {
+          if (slot.key === 'otherInsurancePhoto' && !includeOtherInsurance) {
+            return false
+          }
+          if (visibleKeys && !visibleKeys.includes(slot.key)) {
+            return false
+          }
+          return true
+        }).map((slot) => {
           const isDamageSlot = slot.key === 'damagePhoto'
           const value = isDamageSlot ? photos.damagePhoto : (photos[slot.key] as File | null)
 

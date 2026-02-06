@@ -30,6 +30,19 @@ const getTomorrowDate = () => {
   return tomorrow.toISOString().slice(0, 10)
 }
 
+function Stars({ rating }: { rating: number }) {
+  const full = Math.max(0, Math.min(5, Math.round(rating)))
+  return (
+    <span className="stars" aria-label={`Rating ${rating} out of 5`}>
+      {Array.from({ length: 5 }, (_, index) => (
+        <span key={index} className={`stars__star ${index < full ? 'stars__star--on' : ''}`}>
+          ★
+        </span>
+      ))}
+    </span>
+  )
+}
+
 export default function PostSubmissionNextSteps({
   claimId,
   drivable,
@@ -83,7 +96,7 @@ export default function PostSubmissionNextSteps({
     ? `${rideBooking.provider} driver arriving in ${rideBooking.etaMin} minutes`
     : 'Book a ride home if needed.'
 
-  const shopCards = useMemo(() => shops.slice(0, 3), [shops])
+  const shopCards = useMemo(() => shops.slice(0, 4), [shops])
 
   return (
     <div className="form-grid">
@@ -99,21 +112,27 @@ export default function PostSubmissionNextSteps({
           Choose a nearby shop and we'll send them your claim. If you request a tow, we'll share
           the destination with the tow driver en route.
         </p>
-        <div className="form-grid">
+        <div className="shop-grid">
           {shopCards.map((shop) => {
             if (shopConfirmed && selectedShopId && selectedShopId !== shop.id) {
               return null
             }
             return (
-            <div key={shop.id} className="field-group">
-              <div>
-                <span className="summary__label">Shop</span>
-                <span className="summary__value">{shop.name}</span>
-              </div>
-              <p className="muted">
-                {shop.distanceMi} mi | Rating {shop.rating} | {shop.earliestAppt}
-              </p>
-              <p className="muted">{shop.addressLine}</p>
+              <div key={shop.id} className="shop-card">
+                <div>
+                  <span className="summary__label">Shop</span>
+                  <span className="summary__value">{shop.name}</span>
+                </div>
+                <div className="shop-card__meta">
+                  <span className="muted">{shop.distanceMi} mi</span>
+                  <span className="shop-card__dot" aria-hidden="true">
+                    •
+                  </span>
+                  <Stars rating={shop.rating} />
+                  <span className="muted">{shop.rating.toFixed(1)}</span>
+                </div>
+                <p className="muted">{shop.earliestAppt}</p>
+                <p className="muted">{shop.addressLine}</p>
                 <button
                   type="button"
                   className={`button ${

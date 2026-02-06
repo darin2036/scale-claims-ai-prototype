@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { OtherPartyDetails } from '../types/claim'
-import { US_STATES } from '../data/usStates'
 import PhotoSlotUploader from './PhotoSlotUploader'
-import ExtractionReview from './ExtractionReview'
 import VehicleIdentifierEntry from './VehicleIdentifierEntry'
 import VehicleLookup from './VehicleLookup'
-import { mockExtractPlateAndStateFromImage, mockExtractVinFromImage, type PlateExtraction, type VinExtraction } from '../lib/mockAI'
+import { hashString } from '../server/hash'
 
 interface OtherPartyInfoProps {
   value: OtherPartyDetails
@@ -29,10 +27,6 @@ export default function OtherPartyInfo({ value, onChange }: OtherPartyInfoProps)
   const noticeTimerRef = useRef<number | null>(null)
   const [insuranceCardPhoto, setInsuranceCardPhoto] = useState<File | null>(null)
   const [licensePhoto, setLicensePhoto] = useState<File | null>(null)
-  const [plateVinPhoto, setPlateVinPhoto] = useState<File | null>(null)
-  const [plateExtraction, setPlateExtraction] = useState<PlateExtraction | null>(null)
-  const [vinExtraction, setVinExtraction] = useState<VinExtraction | null>(null)
-  const [extractionMode, setExtractionMode] = useState<'plate' | 'vin'>('plate')
   const [confirmedIdentifier, setConfirmedIdentifier] = useState<{
     mode: 'plate' | 'vin'
     plate?: string
@@ -59,29 +53,123 @@ export default function OtherPartyInfo({ value, onChange }: OtherPartyInfoProps)
     }, 4000)
   }, [])
 
-  useEffect(() => {
-    if (!plateVinPhoto) {
-      setPlateExtraction(null)
-      setVinExtraction(null)
-      return
-    }
-    let active = true
-    Promise.all([
-      mockExtractPlateAndStateFromImage(plateVinPhoto),
-      mockExtractVinFromImage(plateVinPhoto),
-    ]).then(([plateResult, vinResult]) => {
-      if (!active) {
+  const updateFromAutoFill = useCallback(
+    (next: Partial<OtherPartyDetails>, message?: string) => {
+      const merged: OtherPartyDetails = { ...value, ...next }
+      const changed = (Object.keys(next) as Array<keyof OtherPartyDetails>).some(
+        (key) => merged[key] !== value[key],
+      )
+      if (!changed) {
         return
       }
-      setPlateExtraction(plateResult)
-      setVinExtraction(vinResult)
-      setExtractionMode('plate')
-      showNotice('Captured. Review extracted plate/VIN below.')
-    })
-    return () => {
-      active = false
+      onChange(merged)
+      if (message) {
+        showNotice(message)
+      }
+    },
+    [onChange, showNotice, value],
+  )
+
+  const mockExtractNameAndContact = useCallback((file: File) => {
+    const seed = `${file.name}:${file.size}`
+    const hash = hashString(seed)
+    const firstNames = [
+      'Alex',
+      'Taylor',
+      'Jordan',
+      'Casey',
+      'Morgan',
+      'Riley',
+      'Avery',
+      'Sam',
+      'Jamie',
+      'Cameron',
+    ]
+    const lastNames = [
+      'Nguyen',
+      'Patel',
+      'Johnson',
+      'Garcia',
+      'Lee',
+      'Martinez',
+      'Brown',
+      'Davis',
+      'Wilson',
+      'Anderson',
+    ]
+    const first = firstNames[hash % firstNames.length]
+    const last = lastNames[(hashString(`${seed}:last`) + 3) % lastNames.length]
+    const name = `${first} ${last}`
+    const phone = `(555) ${String(100 + (hash % 800)).padStart(3, '0')}-${String(1000 + (hash % 9000)).padStart(4, '0')}`
+    const email = `${first.toLowerCase()}.${last.toLowerCase()}@example.com`
+    const contact = hash % 2 === 0 ? phone : email
+    return { name, contact }
+  }, [])
+
+  const mockExtractInsurance = useCallback((file: File) => {
+    const seed = `${file.name}:${file.size}`
+    const hash = hashString(seed)
+    const carriers = [
+      'State Farm',
+      'GEICO',
+      'Progressive',
+      'Allstate',
+      'USAA',
+      'Liberty Mutual',
+      'Farmers',
+      'Nationwide',
+    ]
+    const carrier = carriers[hash % carriers.length]
+    const policyNumber = `POL-${String(100000 + (hash % 900000)).padStart(6, '0')}-${String(hashString(`${seed}:p`) % 1000).padStart(3, '0')}`
+    return { carrier, policyNumber }
+  }, [])
+
+  useEffect(() => {
+    if (value.noInfo) {
+      return
     }
-  }, [plateVinPhoto, showNotice])
+    if (!licensePhoto) {
+      return
+    }
+    const extracted = mockExtractNameAndContact(licensePhoto)
+    updateFromAutoFill(
+      {
+        otherDriverName: value.otherDriverName.trim() ? value.otherDriverName : extracted.name,
+        otherContact: value.otherContact.trim() ? value.otherContact : extracted.contact,
+      },
+      'Driver license scanned (mock). We filled what we could.',
+    )
+  }, [licensePhoto, mockExtractNameAndContact, updateFromAutoFill, value.noInfo, value.otherContact, value.otherDriverName])
+
+  useEffect(() => {
+    if (value.noInfo) {
+      return
+    }
+    if (!insuranceCardPhoto) {
+      return
+    }
+    const extractedName = mockExtractNameAndContact(insuranceCardPhoto)
+    const extractedInsurance = mockExtractInsurance(insuranceCardPhoto)
+    updateFromAutoFill(
+      {
+        otherDriverName: value.otherDriverName.trim() ? value.otherDriverName : extractedName.name,
+        insuranceCarrier: value.insuranceCarrier.trim()
+          ? value.insuranceCarrier
+          : extractedInsurance.carrier,
+        policyNumber: value.policyNumber.trim() ? value.policyNumber : extractedInsurance.policyNumber,
+      },
+      'Insurance card scanned (mock). We filled carrier and policy info.',
+    )
+  }, [
+    insuranceCardPhoto,
+    mockExtractInsurance,
+    mockExtractNameAndContact,
+    updateFromAutoFill,
+    value.insuranceCarrier,
+    value.noInfo,
+    value.otherDriverName,
+    value.policyNumber,
+  ])
 
   const identifierForLookup = useMemo(() => {
     if (!confirmedIdentifier) {
@@ -171,43 +259,8 @@ export default function OtherPartyInfo({ value, onChange }: OtherPartyInfoProps)
                   value={licensePhoto}
                   onChange={(nextValue) => setLicensePhoto((nextValue as File | null) ?? null)}
                 />
-                <PhotoSlotUploader
-                  title="Other vehicle plate/VIN photo"
-                  hint="Optional. We can try to extract identifiers to speed up lookup."
-                  value={plateVinPhoto}
-                  onChange={(nextValue) => setPlateVinPhoto((nextValue as File | null) ?? null)}
-                />
               </div>
             </div>
-
-            {plateVinPhoto && (plateExtraction || vinExtraction) && (
-              <div className="field">
-                <div className="chip-group">
-                  <span className="chip">Extract</span>
-                  <button
-                    type="button"
-                    className={`chip ${extractionMode === 'plate' ? 'chip--strong' : ''}`}
-                    onClick={() => setExtractionMode('plate')}
-                  >
-                    Plate
-                  </button>
-                  <button
-                    type="button"
-                    className={`chip ${extractionMode === 'vin' ? 'chip--strong' : ''}`}
-                    onClick={() => setExtractionMode('vin')}
-                  >
-                    VIN
-                  </button>
-                </div>
-                <ExtractionReview
-                  mode={extractionMode}
-                  plateExtraction={plateExtraction}
-                  vinExtraction={vinExtraction}
-                  contextNote="Review the extracted identifier, then confirm to run vehicle lookup."
-                  onConfirm={handleConfirmIdentifier}
-                />
-              </div>
-            )}
 
             <div className="field">
               <div className="field__label">Other vehicle lookup (optional)</div>
@@ -250,35 +303,20 @@ export default function OtherPartyInfo({ value, onChange }: OtherPartyInfoProps)
               />
             </label>
 
-            <div className="form-grid form-grid--three">
-              <label className="field">
-                <span className="field__label">License plate</span>
-                <input
-                  className="field__input"
-                  type="text"
-                  value={value.otherVehiclePlate}
-                  onChange={(event) =>
-                    updateField(value, onChange, 'otherVehiclePlate', event.target.value)
-                  }
-                />
-              </label>
-              <label className="field">
-                <span className="field__label">State</span>
-                <select
-                  className="field__input"
-                  value={value.otherVehicleState}
-                  onChange={(event) =>
-                    updateField(value, onChange, 'otherVehicleState', event.target.value)
-                  }
-                >
-                  <option value="">Select</option>
-                  {US_STATES.map((state) => (
-                    <option key={state.code} value={state.code}>
-                      {state.code}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="summary summary--compact">
+              <div>
+                <span className="summary__label">Other vehicle plate</span>
+                <span className="summary__value">{value.otherVehiclePlate || 'Not provided'}</span>
+              </div>
+              <div>
+                <span className="summary__label">State</span>
+                <span className="summary__value">{value.otherVehicleState || 'Not provided'}</span>
+              </div>
+              <div className="summary__full">
+                <p className="muted" style={{ margin: 0 }}>
+                  Use “Other vehicle lookup” above to capture plate/state (no need to enter it twice).
+                </p>
+              </div>
             </div>
 
             <label className="field">

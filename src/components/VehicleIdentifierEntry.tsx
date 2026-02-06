@@ -1,11 +1,17 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { US_STATES } from '../data/usStates'
 
 type Mode = 'plate' | 'vin'
 
 interface VehicleIdentifierEntryProps {
   initialStateCode?: string
-  onConfirm: (payload: { mode: Mode; state?: string; plate?: string; vin?: string }) => void
+  onConfirm?: (payload: { mode: Mode; state?: string; plate?: string; vin?: string }) => void
+  onDraft?: (draft: {
+    canConfirm: boolean
+    payload: { mode: Mode; state?: string; plate?: string; vin?: string } | null
+  }) => void
+  confirmLabel?: string
+  hideConfirm?: boolean
 }
 
 const normalize = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, '')
@@ -15,6 +21,9 @@ const isValidVin = (value: string) => /^[A-HJ-NPR-Z0-9]{17}$/.test(value)
 export default function VehicleIdentifierEntry({
   initialStateCode,
   onConfirm,
+  onDraft,
+  confirmLabel = 'Confirm',
+  hideConfirm = false,
 }: VehicleIdentifierEntryProps) {
   const [stateCode, setStateCode] = useState(initialStateCode ?? '')
   const [rawIdentifier, setRawIdentifier] = useState('')
@@ -36,8 +45,25 @@ export default function VehicleIdentifierEntry({
     return stateCode.trim().length > 0
   }, [inferredMode, normalizedIdentifier, plateLengthOk, stateCode])
 
+  const draftPayload = useMemo(() => {
+    if (!canConfirm) {
+      return null
+    }
+    if (inferredMode === 'vin') {
+      return { mode: 'vin' as const, vin: normalizedIdentifier }
+    }
+    return { mode: 'plate' as const, state: stateCode.toUpperCase(), plate: normalizedIdentifier }
+  }, [canConfirm, inferredMode, normalizedIdentifier, stateCode])
+
+  useEffect(() => {
+    onDraft?.({ canConfirm, payload: draftPayload })
+  }, [canConfirm, draftPayload, onDraft])
+
   const handleConfirm = () => {
     if (!canConfirm) {
+      return
+    }
+    if (!onConfirm) {
       return
     }
     if (inferredMode === 'vin') {
@@ -94,12 +120,20 @@ export default function VehicleIdentifierEntry({
       </label>
 
       <div className="lookup__actions">
-        <button type="button" className="button button--primary" onClick={handleConfirm} disabled={!canConfirm}>
-          Confirm
-        </button>
-        <p className="muted">You can edit this later.</p>
+        {!hideConfirm && onConfirm && (
+          <>
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={handleConfirm}
+              disabled={!canConfirm}
+            >
+              {confirmLabel}
+            </button>
+            <p className="muted">You can edit this later.</p>
+          </>
+        )}
       </div>
     </div>
   )
 }
-

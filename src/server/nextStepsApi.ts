@@ -139,7 +139,7 @@ export async function getRecommendedRepairShops(vehicle: Vehicle): Promise<Repai
   const seed = `${vehicle.make}-${vehicle.model}-${vehicle.year}`
   return withLatency(`shops-${seed}`, () => {
     const start = hashString(seed) % shopCatalog.length
-    return [0, 1, 2].map((offset) => shopCatalog[(start + offset) % shopCatalog.length])
+    return [0, 1, 2, 3].map((offset) => shopCatalog[(start + offset) % shopCatalog.length])
   })
 }
 

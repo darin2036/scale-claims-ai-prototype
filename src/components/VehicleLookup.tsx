@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { lookupVehicleByIdentifier } from '../server/fakeApi'
 import type { Vehicle } from '../server/fakeDb'
 
@@ -13,21 +13,26 @@ export default function VehicleLookup({
   identifier,
   onLookupComplete,
 }: VehicleLookupProps) {
+  const onLookupCompleteRef = useRef(onLookupComplete)
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [message, setMessage] = useState('')
   const [result, setResult] = useState<Vehicle | null>(null)
 
   useEffect(() => {
+    onLookupCompleteRef.current = onLookupComplete
+  }, [onLookupComplete])
+
+  useEffect(() => {
     setResult(null)
     setStatus('idle')
     setMessage('')
-    onLookupComplete(null)
-  }, [identifier, stateCode, onLookupComplete])
+    onLookupCompleteRef.current(null)
+  }, [identifier, stateCode])
 
   const resetResult = () => {
     if (result) {
       setResult(null)
-      onLookupComplete(null)
+      onLookupCompleteRef.current(null)
     }
     setStatus('idle')
     setMessage('')
@@ -37,7 +42,7 @@ export default function VehicleLookup({
     setStatus('loading')
     setMessage('')
     setResult(null)
-    onLookupComplete(null)
+    onLookupCompleteRef.current(null)
 
     try {
       const lookupResult = await lookupVehicleByIdentifier({
@@ -45,14 +50,14 @@ export default function VehicleLookup({
         identifier,
       })
       setResult(lookupResult)
-      onLookupComplete(lookupResult)
+      onLookupCompleteRef.current(lookupResult)
       setStatus('idle')
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Lookup failed. Please retry.'
       setStatus('error')
       setMessage(messageText)
     }
-  }, [identifier, onLookupComplete, stateCode])
+  }, [identifier, stateCode])
 
   useEffect(() => {
     if (!identifier.trim()) {
@@ -63,22 +68,28 @@ export default function VehicleLookup({
 
   return (
     <div className="lookup">
-      <div className="lookup__actions">
-        <button
-          type="button"
-          className="button button--primary"
-          disabled={status === 'loading'}
-          onClick={() => {
-            resetResult()
-            void handleLookup()
-          }}
-        >
-          {status === 'loading' ? 'Looking up...' : 'Retry lookup'}
-        </button>
-        <p className="muted">Uses deterministic mock lookup data.</p>
-      </div>
+      {status === 'loading' && <p className="muted">Looking up the other vehicle…</p>}
 
-      {message && <p className="field__hint text-error">{message}</p>}
+      {message && (
+        <div className="callout callout--warn">
+          <p style={{ margin: 0 }}>
+            <strong>Lookup needs a retry.</strong> {message}
+          </p>
+          <div className="lookup__actions" style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="button button--ghost"
+              disabled={status === 'loading'}
+              onClick={() => {
+                resetResult()
+                void handleLookup()
+              }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
 
       {result && (
         <div className="summary summary--compact">

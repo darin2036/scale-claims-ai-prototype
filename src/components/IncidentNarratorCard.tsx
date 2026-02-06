@@ -7,9 +7,15 @@ interface IncidentNarratorCardProps {
   facts: NarratorFacts
   value: NarratorValue
   onChange: (next: NarratorValue) => void
+  compact?: boolean
 }
 
-export default function IncidentNarratorCard({ facts, value, onChange }: IncidentNarratorCardProps) {
+export default function IncidentNarratorCard({
+  facts,
+  value,
+  onChange,
+  compact = false,
+}: IncidentNarratorCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [showWhy, setShowWhy] = useState(false)
 
@@ -37,7 +43,11 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
       <div>
         <p className="step">Optional</p>
         <h2>Incident description</h2>
-        <p className="muted">We drafted this based on your photos and answers. You can edit it anytime.</p>
+        <p className="muted">
+          {compact
+            ? 'AI-drafted summary based on your photos and answers.'
+            : 'We drafted this based on your photos and answers. You can edit it anytime.'}
+        </p>
       </div>
 
       {accepted && <div className="callout callout--success">Added to your claim</div>}
@@ -51,23 +61,31 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
         </div>
       </div>
 
-      <label className="field">
-        <span className="field__label">Description</span>
-        <textarea
-          className="field__input"
-          rows={6}
-          value={narrationText}
-          placeholder="Optional: Edit this description, or regenerate a draft."
-          onChange={(event) =>
-            onChange({
-              narration: event.target.value,
-              accepted: false,
-              edits,
-            })
-          }
-          disabled={accepted}
-        />
-      </label>
+      {compact ? (
+        <div className="callout">
+          <p className="muted" style={{ margin: 0 }}>
+            {narrationText}
+          </p>
+        </div>
+      ) : (
+        <label className="field">
+          <span className="field__label">Description</span>
+          <textarea
+            className="field__input"
+            rows={6}
+            value={narrationText}
+            placeholder="Optional: Edit this description, or regenerate a draft."
+            onChange={(event) =>
+              onChange({
+                narration: event.target.value,
+                accepted: false,
+                edits,
+              })
+            }
+            disabled={accepted}
+          />
+        </label>
+      )}
 
       <div className="field-group">
         <h3>Key facts</h3>
@@ -80,35 +98,54 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
         </ul>
       </div>
 
-      <div className="lookup__actions">
-        <button type="button" className="button button--ghost" onClick={() => setExpanded((prev) => !prev)}>
-          {expanded ? 'Hide notes' : 'Add notes'}
-        </button>
-        <button
-          type="button"
-          className="button button--ghost"
-          onClick={() => update(edits)}
-          disabled={accepted}
-        >
-          Regenerate draft
-        </button>
-        <button
-          type="button"
-          className="button button--primary"
-          onClick={() =>
-            onChange({
-              narration: narrationText,
-              accepted: true,
-              edits,
-            })
-          }
-          disabled={accepted}
-        >
-          Use this description
-        </button>
-      </div>
+      {compact ? (
+        <div className="lookup__actions">
+          <button
+            type="button"
+            className={`button ${accepted ? 'button--ghost' : 'button--primary'}`}
+            onClick={() =>
+              onChange({
+                narration: narrationText,
+                accepted: !accepted,
+                edits,
+              })
+            }
+          >
+            {accepted ? 'Remove from claim' : 'Add to claim'}
+          </button>
+          <p className="muted">You can edit details in Step 3 before submitting.</p>
+        </div>
+      ) : (
+        <div className="lookup__actions">
+          <button type="button" className="button button--ghost" onClick={() => setExpanded((prev) => !prev)}>
+            {expanded ? 'Hide notes' : 'Add notes'}
+          </button>
+          <button
+            type="button"
+            className="button button--ghost"
+            onClick={() => update(edits)}
+            disabled={accepted}
+          >
+            Regenerate draft
+          </button>
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() =>
+              onChange({
+                narration: narrationText,
+                accepted: true,
+                edits,
+              })
+            }
+            disabled={accepted}
+          >
+            Use this description
+          </button>
+        </div>
+      )}
 
-      {expanded && (
+      {!compact && expanded && (
         <div className="form-grid">
           <label className="field">
             <span className="field__label">Notes</span>
