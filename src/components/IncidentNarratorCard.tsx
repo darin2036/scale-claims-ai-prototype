@@ -9,16 +9,6 @@ interface IncidentNarratorCardProps {
   onChange: (next: NarratorValue) => void
 }
 
-const drivableToSelectValue = (drivable?: boolean | null) => {
-  if (drivable === true) {
-    return 'yes'
-  }
-  if (drivable === false) {
-    return 'no'
-  }
-  return 'unknown'
-}
-
 export default function IncidentNarratorCard({ facts, value, onChange }: IncidentNarratorCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [showWhy, setShowWhy] = useState(false)
@@ -31,13 +21,6 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
   const accepted = value?.accepted ?? false
   const narrationText = value?.narration ?? draft.narration
   const confidencePercent = Math.round(draft.confidence * 100)
-
-  const selectedDrivable = useMemo(() => {
-    if (Object.prototype.hasOwnProperty.call(edits, 'drivable')) {
-      return edits.drivable
-    }
-    return facts.drivable
-  }, [edits, facts.drivable])
 
   const update = (nextEdits: Partial<NarratorFacts>) => {
     const nextFacts: NarratorFacts = { ...facts, ...nextEdits }
@@ -52,9 +35,9 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
   return (
     <div className="field-group">
       <div>
-        <p className="step">AI Draft</p>
-        <h2>Incident summary (AI drafted)</h2>
-        <p className="muted">Review and edit a couple key details if needed.</p>
+        <p className="step">Optional</p>
+        <h2>Incident description</h2>
+        <p className="muted">We drafted this based on your photos and answers. You can edit it anytime.</p>
       </div>
 
       {accepted && <div className="callout callout--success">Added to your claim</div>}
@@ -68,9 +51,23 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
         </div>
       </div>
 
-      <p className="muted" style={{ lineHeight: 1.45 }}>
-        {narrationText}
-      </p>
+      <label className="field">
+        <span className="field__label">Description</span>
+        <textarea
+          className="field__input"
+          rows={6}
+          value={narrationText}
+          placeholder="Optional: Edit this description, or regenerate a draft."
+          onChange={(event) =>
+            onChange({
+              narration: event.target.value,
+              accepted: false,
+              edits,
+            })
+          }
+          disabled={accepted}
+        />
+      </label>
 
       <div className="field-group">
         <h3>Key facts</h3>
@@ -85,7 +82,7 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
 
       <div className="lookup__actions">
         <button type="button" className="button button--ghost" onClick={() => setExpanded((prev) => !prev)}>
-          {expanded ? 'Hide edits' : 'Edit details'}
+          {expanded ? 'Hide notes' : 'Add notes'}
         </button>
         <button
           type="button"
@@ -93,7 +90,7 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
           onClick={() => update(edits)}
           disabled={accepted}
         >
-          Regenerate summary
+          Regenerate draft
         </button>
         <button
           type="button"
@@ -107,56 +104,19 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
           }
           disabled={accepted}
         >
-          Use this summary
+          Use this description
         </button>
       </div>
 
       {expanded && (
         <div className="form-grid">
           <label className="field">
-            <span className="field__label">Drivable</span>
-            <select
-              className="field__input"
-              value={drivableToSelectValue(selectedDrivable)}
-              onChange={(event) => {
-                const next =
-                  event.target.value === 'yes'
-                    ? true
-                    : event.target.value === 'no'
-                      ? false
-                      : null
-                update({ ...edits, drivable: next })
-              }}
-              disabled={accepted}
-            >
-              <option value="unknown">Unknown</option>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-          </label>
-
-          {typeof facts.hasOtherParty === 'boolean' && (
-            <label className="field">
-              <span className="field__label">Other party involved</span>
-              <select
-                className="field__input"
-                value={(edits.hasOtherParty ?? facts.hasOtherParty) ? 'yes' : 'no'}
-                onChange={(event) => update({ ...edits, hasOtherParty: event.target.value === 'yes' })}
-                disabled={accepted}
-              >
-                <option value="yes">Yes</option>
-                <option value="no">No</option>
-              </select>
-            </label>
-          )}
-
-          <label className="field">
             <span className="field__label">Notes</span>
             <textarea
               className="field__input"
               rows={3}
               value={edits.userNotes ?? facts.userNotes ?? ''}
-              placeholder="Optional: Add a short note to refine the summary."
+              placeholder="Optional: Add a short note to refine the draft."
               onChange={(event) => update({ ...edits, userNotes: event.target.value.slice(0, 220) })}
               disabled={accepted}
             />
@@ -165,7 +125,7 @@ export default function IncidentNarratorCard({ facts, value, onChange }: Inciden
       )}
 
       <button type="button" className="link-button" onClick={() => setShowWhy((prev) => !prev)}>
-        Why this summary?
+        Why this draft?
       </button>
 
       {showWhy && (

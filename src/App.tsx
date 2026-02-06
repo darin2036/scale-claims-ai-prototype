@@ -15,7 +15,6 @@ import ProgressHeader from './components/ProgressHeader'
 import DrivableCheck from './components/DrivableCheck'
 import SubmitClaimCard from './components/SubmitClaimCard'
 import PostSubmissionNextSteps from './components/PostSubmissionNextSteps'
-import IncidentDescription from './components/IncidentDescription'
 import IncidentNarratorCard from './components/IncidentNarratorCard'
 import { getMakesForYear, getModelsForYearMake, vehicleYears } from './data/vehicleData'
 import {
@@ -24,7 +23,7 @@ import {
 } from './lib/mockAI'
 import { generateRepairEstimate } from './lib/estimation'
 import { computeUrgencyMode, type CopilotContext } from './lib/aiCopilot'
-import { type NarratorFacts } from './lib/incidentNarrator'
+import { generateIncidentNarration, type NarratorFacts } from './lib/incidentNarrator'
 import { mockLookupLocation } from './lib/mockLocation'
 import {
   getPolicyHolderByScenario,
@@ -154,12 +153,12 @@ function App() {
   const [emergencyTranscript, setEmergencyTranscript] = useState('')
   const [emergencySummary, setEmergencySummary] = useState('')
   const [viewMode, setViewMode] = useState<'app' | 'tow' | 'insurer'>('app')
-  const [incidentDescription, setIncidentDescription] = useState('')
   const [incidentNarrator, setIncidentNarrator] = useState<{
     narration: string
     accepted: boolean
     edits?: Partial<NarratorFacts>
   } | null>(null)
+  const [showVehicleIdentifierEdit, setShowVehicleIdentifierEdit] = useState(false)
 
   const steps = useMemo(() => {
     const includeOtherParty = hasOtherParty === true
@@ -266,6 +265,7 @@ function App() {
     vin?: string
   }) => {
     setConfirmedIdentifier(payload)
+    setShowVehicleIdentifierEdit(false)
     setUseManualVehicleEntry(false)
     setVehicleResult(null)
     setSuggestedVehicle(null)
@@ -429,9 +429,9 @@ function App() {
     }
     setIsSubmitting(true)
     try {
-      const incidentNarrationText = incidentNarrator?.accepted
-        ? incidentNarrator.narration.trim()
-        : undefined
+      const draftIncidentDescriptionText = generateIncidentNarration(narratorFacts).narration
+      const incidentDescriptionText = (incidentNarrator?.narration ?? draftIncidentDescriptionText).trim()
+      const incidentNarrationText = incidentNarrator?.accepted ? incidentDescriptionText : undefined
       const claimPayload = {
         vehicle: vehicleResult,
         drivable,
@@ -450,7 +450,7 @@ function App() {
           : null,
         hasOtherParty,
         otherPartyDetails: hasOtherParty ? otherPartyDetails : null,
-        incidentDescription: incidentDescription.trim() ? incidentDescription.trim() : undefined,
+        incidentDescription: incidentDescriptionText ? incidentDescriptionText : undefined,
         incidentNarrationText: incidentNarrationText ? incidentNarrationText : undefined,
         incidentNarrationAccepted: Boolean(incidentNarrator?.accepted),
         tow: tow ? { requested: Boolean(tow.towId), status: tow.status } : undefined,
@@ -945,7 +945,8 @@ function App() {
     setEmergencyManualLocation('')
     setEmergencyTranscript('')
     setEmergencySummary('')
-    setIncidentDescription('')
+    setIncidentNarrator(null)
+    setShowVehicleIdentifierEdit(false)
   }
 
   const handleNext = async () => {
@@ -1408,27 +1409,14 @@ function App() {
           </button>
         </div>
         <header className="app__brand">
-          <div className="app__brandMain">
-            <div className="app__brandMark" aria-hidden="true">
-              <img
-                src={fenderbenderLogo}
-                alt=""
-                className="app__brandLogo"
-              />
-            </div>
-            <div className="app__brandText">
-              <span className="app__brandName">FenderBender Mutual</span>
-              <span className="app__brandTag">
-                Claim Assist
-              </span>
-            </div>
-          </div>
+          <img src={fenderbenderLogo} alt="FenderBender Mutual" className="app__brandLogo" />
         </header>
         <ProgressHeader
-          currentStep={currentStep}
-          totalSteps={steps.total}
+          currentStep={Math.max(1, currentStep - 1)}
+          totalSteps={Math.max(1, steps.total - 1)}
           title={headerTitle}
           subtitle={headerSubtitle}
+          showProgress={currentStep !== steps.prelude}
         />
 
         <section className="panel panel--step">
@@ -1736,9 +1724,11 @@ function App() {
                     className="button button--ghost"
                     onClick={() => {
                       if (useManualVehicleEntry) {
+                        setShowVehicleIdentifierEdit(false)
                         setCurrentStep(steps.identifier)
                         return
                       }
+                      setShowVehicleIdentifierEdit(false)
                       setUseManualVehicleEntry(true)
                       setConfirmedIdentifier(null)
                       setVehicleResult(null)
@@ -1757,10 +1747,10 @@ function App() {
 
                 <fieldset className="field-group">
                   <legend>
-                    {useManualVehicleEntry ? 'Enter vehicle details manually' : 'Confirm vehicle details'}
+                    {useManualVehicleEntry ? 'Enter vehicle details manually' : 'Vehicle'}
                   </legend>
 
-                  {!useManualVehicleEntry && (
+                  {!useManualVehicleEntry ? (
                     <>
                       {vehicleLookupStatus === 'loading' && (
                         <p className="muted">Looking up your vehicle...</p>
@@ -1785,122 +1775,183 @@ function App() {
                           Go back to enter a plate or VIN, or switch to manual entry.
                         </p>
                       )}
+
+                      {vehicleResult ? (
+                        <div className="summary summary--compact">
+                          <div>
+                            <span className="summary__label">Vehicle</span>
+                            <span className="summary__value">
+                              {vehicleResult.year} {vehicleResult.make} {vehicleResult.model}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Body type</span>
+                            <span className="summary__value">{vehicleResult.bodyType}</span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Identifier</span>
+                            <span className="summary__value">{identifierLabel}</span>
+                          </div>
+                        </div>
+                      ) : suggestedVehicle ? (
+                        <>
+                          <div className="summary summary--compact">
+                            <div>
+                              <span className="summary__label">Vehicle</span>
+                              <span className="summary__value">
+                                {suggestedVehicle.year} {suggestedVehicle.make} {suggestedVehicle.model}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="summary__label">Body type</span>
+                              <span className="summary__value">{suggestedVehicle.bodyType}</span>
+                            </div>
+                            <div>
+                              <span className="summary__label">Identifier</span>
+                              <span className="summary__value">{identifierLabel}</span>
+                            </div>
+                          </div>
+
+                          <div className="lookup__actions">
+                            <button
+                              type="button"
+                              className="button button--primary"
+                              onClick={() => setVehicleResult(suggestedVehicle)}
+                            >
+                              Confirm this vehicle
+                            </button>
+                            <p className="muted">If anything looks off, edit the plate or VIN and retry.</p>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="muted">
+                          Once we have your plate or VIN, we will show your vehicle details here.
+                        </p>
+                      )}
+
+                      <div className="lookup__actions">
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => setShowVehicleIdentifierEdit((prev) => !prev)}
+                          disabled={vehicleLookupStatus === 'loading'}
+                        >
+                          {showVehicleIdentifierEdit ? 'Hide edit' : 'Edit plate or VIN'}
+                        </button>
+                      </div>
+
+                      {showVehicleIdentifierEdit && (
+                        <div className="field-group">
+                          <VehicleIdentifierEntry
+                            key={lookupKey}
+                            initialStateCode={
+                              confirmedIdentifier?.mode === 'plate' ? confirmedIdentifier.state : undefined
+                            }
+                            onConfirm={handleConfirmIdentifier}
+                          />
+                        </div>
+                      )}
                     </>
-                  )}
+                  ) : (
+                    <>
+                      <p className="muted">Use the dropdowns to select the vehicle.</p>
 
-                  <p className="muted">
-                    {useManualVehicleEntry
-                      ? 'Use the dropdowns to select the vehicle.'
-                      : 'We pre-filled these details. Please confirm or edit anything.'}
-                  </p>
+                      <div className="form-grid form-grid--three">
+                        <label className="field">
+                          <span className="field__label">Year</span>
+                          <select
+                            className="field__input"
+                            value={manualYear}
+                            onChange={(event) => {
+                              setManualYear(event.target.value)
+                              setManualMake('')
+                              setManualModel('')
+                              setVehicleResult(null)
+                            }}
+                          >
+                            <option value="">Select year</option>
+                            {yearOptions.map((year) => (
+                              <option key={year} value={year}>
+                                {year}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
 
-                  <div className="form-grid form-grid--three">
-                    <label className="field">
-                      <span className="field__label">Year</span>
-                      <select
-                        className="field__input"
-                        value={manualYear}
-                        onChange={(event) => {
-                          setManualYear(event.target.value)
-                          setManualMake('')
-                          setManualModel('')
-                          setVehicleResult(null)
-                        }}
-                      >
-                        <option value="">Select year</option>
-                        {yearOptions.map((year) => (
-                          <option key={year} value={year}>
-                            {year}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                        <label className="field">
+                          <span className="field__label">Make</span>
+                          <select
+                            className="field__input"
+                            value={manualMake}
+                            onChange={(event) => {
+                              setManualMake(event.target.value)
+                              setManualModel('')
+                              setVehicleResult(null)
+                            }}
+                            disabled={!manualYear}
+                          >
+                            <option value="">Select make</option>
+                            {makeOptions.map((make) => (
+                              <option key={make} value={make}>
+                                {make}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
 
-                    <label className="field">
-                      <span className="field__label">Make</span>
-                      <select
-                        className="field__input"
-                        value={manualMake}
-                        onChange={(event) => {
-                          setManualMake(event.target.value)
-                          setManualModel('')
-                          setVehicleResult(null)
-                        }}
-                        disabled={!manualYear}
-                      >
-                        <option value="">Select make</option>
-                        {makeOptions.map((make) => (
-                          <option key={make} value={make}>
-                            {make}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span className="field__label">Model</span>
-                      <select
-                        className="field__input"
-                        value={manualModel}
-                        onChange={(event) => {
-                          setManualModel(event.target.value)
-                          setVehicleResult(null)
-                        }}
-                        disabled={!manualYear || !manualMake}
-                      >
-                        <option value="">Select model</option>
-                        {modelOptions.map((model) => (
-                          <option key={model} value={model}>
-                            {model}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-
-                  <label className="field">
-                    <span className="field__label">Body type</span>
-                    <select
-                      className="field__input"
-                      value={manualBodyType}
-                      onChange={(event) => {
-                        setManualBodyType(event.target.value as Vehicle['bodyType'])
-                        setVehicleResult(null)
-                      }}
-                    >
-                      {BODY_TYPES.map((type) => (
-                        <option key={type} value={type}>
-                          {type}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <div className="lookup__actions">
-                    <button
-                      type="button"
-                      className="button button--primary"
-                      disabled={!canConfirmVehicleDetails}
-                      onClick={handleConfirmVehicleDetails}
-                    >
-                      Confirm vehicle
-                    </button>
-                    <p className="muted">We will confirm your vehicle to match the right repair guidance.</p>
-                  </div>
-
-                  {vehicleResult && (
-                    <div className="summary summary--compact">
-                      <div>
-                        <span className="summary__label">Vehicle</span>
-                        <span className="summary__value">
-                          {vehicleResult.year} {vehicleResult.make} {vehicleResult.model}
-                        </span>
+                        <label className="field">
+                          <span className="field__label">Model</span>
+                          <select
+                            className="field__input"
+                            value={manualModel}
+                            onChange={(event) => {
+                              setManualModel(event.target.value)
+                              setVehicleResult(null)
+                            }}
+                            disabled={!manualYear || !manualMake}
+                          >
+                            <option value="">Select model</option>
+                            {modelOptions.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
                       </div>
-                      <div>
-                        <span className="summary__label">Body type</span>
-                        <span className="summary__value">{vehicleResult.bodyType}</span>
+
+                      <label className="field">
+                        <span className="field__label">Body type</span>
+                        <select
+                          className="field__input"
+                          value={manualBodyType}
+                          onChange={(event) => {
+                            setManualBodyType(event.target.value as Vehicle['bodyType'])
+                            setVehicleResult(null)
+                          }}
+                        >
+                          {BODY_TYPES.map((type) => (
+                            <option key={type} value={type}>
+                              {type}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <div className="lookup__actions">
+                        <button
+                          type="button"
+                          className="button button--primary"
+                          disabled={!canConfirmVehicleDetails}
+                          onClick={handleConfirmVehicleDetails}
+                        >
+                          Confirm vehicle
+                        </button>
+                        <p className="muted">
+                          We will confirm your vehicle to match the right repair guidance.
+                        </p>
                       </div>
-                    </div>
+                    </>
                   )}
                 </fieldset>
               </>
@@ -2089,16 +2140,15 @@ function App() {
                         onChange={setIncidentNarrator}
                       />
                     )}
-                    <IncidentDescription
-                      ctx={copilotCtx}
-                      value={incidentDescription}
-                      onChange={setIncidentDescription}
-                      hasOtherParty={hasOtherParty ?? undefined}
-                      otherParty={hasOtherParty ? otherPartyDetails : undefined}
-                    />
                     <SubmitClaimCard
                       vehicle={vehicleResult}
                       drivable={drivable}
+                      hasOtherParty={hasOtherParty}
+                      photosSummary={{
+                        damageCount: photos.damagePhoto.length,
+                        vehicle: Boolean(photos.vehiclePhoto),
+                        otherInsurance: Boolean(photos.otherInsurancePhoto),
+                      }}
                       estimateSummary={
                         estimateSummary
                           ? {
@@ -2109,6 +2159,13 @@ function App() {
                             }
                           : null
                       }
+                      onEditVehicle={() => {
+                        setShowVehicleIdentifierEdit(true)
+                        setCurrentStep(steps.vehicleConfirm)
+                      }}
+                      onChangeDrivable={() => setCurrentStep(steps.drivable)}
+                      onChangeOtherParty={() => setCurrentStep(steps.incident)}
+                      onEditPhotos={() => setCurrentStep(steps.photos)}
                       disabled={!vehicleResult || drivable === null || isSubmitting}
                       submitting={isSubmitting}
                       claimId={claimId}
