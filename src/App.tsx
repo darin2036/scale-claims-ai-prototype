@@ -1388,7 +1388,6 @@ function App() {
   return (
     <div className="app">
       <main className="app__shell">
-        <p className="muted">FenderBender Mutual</p>
         <div className="app__reset">
           <button type="button" className="link-button" onClick={handleRestart}>
             Start workflow over
