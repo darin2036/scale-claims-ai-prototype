@@ -1,4 +1,5 @@
 import type { Vehicle } from './fakeDb'
+import type { OtherPartyDetails } from '../types/claim'
 import { hashString } from './hash'
 
 export type TowStatus = 'requested' | 'dispatched' | 'arriving' | 'complete'
@@ -51,6 +52,11 @@ export async function submitClaim(payload: {
   vehicle: Vehicle
   drivable: boolean | null
   photos: { damage: boolean; vehicle: boolean; otherInsurance: boolean }
+  hasOtherParty?: boolean | null
+  otherPartyDetails?: OtherPartyDetails | null
+  incidentDescription?: string
+  incidentNarrationText?: string
+  incidentNarrationAccepted?: boolean
   estimate?: {
     estimatedRepairCost: number
     aboveDeductible: boolean

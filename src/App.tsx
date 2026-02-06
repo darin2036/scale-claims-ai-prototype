@@ -5,6 +5,8 @@ import PhotoChecklistUploader, {
   type ChecklistPhotos,
   type PhotoKey,
 } from './components/PhotoChecklistUploader'
+import OtherPartyInfo from './components/OtherPartyInfo'
+import type { OtherPartyDetails } from './types/claim'
 import VehicleIdentifierEntry from './components/VehicleIdentifierEntry'
 import AIAssessmentPanel from './components/AIAssessmentPanel'
 import EstimateBreakdown from './components/EstimateBreakdown'
@@ -13,12 +15,17 @@ import ProgressHeader from './components/ProgressHeader'
 import DrivableCheck from './components/DrivableCheck'
 import SubmitClaimCard from './components/SubmitClaimCard'
 import PostSubmissionNextSteps from './components/PostSubmissionNextSteps'
+import IncidentDescription from './components/IncidentDescription'
+import IncidentNarratorCard from './components/IncidentNarratorCard'
 import { getMakesForYear, getModelsForYearMake, vehicleYears } from './data/vehicleData'
 import {
   assessDamage,
   type AIAssessment,
 } from './lib/mockAI'
 import { generateRepairEstimate } from './lib/estimation'
+import { computeUrgencyMode, type CopilotContext } from './lib/aiCopilot'
+import { type NarratorFacts } from './lib/incidentNarrator'
+import { mockLookupLocation } from './lib/mockLocation'
 import {
   getPolicyHolderByScenario,
   listDemoScenarios,
@@ -37,7 +44,6 @@ import {
 import type { PolicyHolder, Vehicle } from './server/fakeDb'
 
 const USE_NEW_ESTIMATE = true
-const TOTAL_STEPS = 10
 const BODY_TYPES: Array<Vehicle['bodyType']> = ['Sedan', 'SUV', 'Truck', 'EV', 'Luxury']
 
 const estimateValueForManualVehicle = (year: number, bodyType: Vehicle['bodyType']) => {
@@ -69,8 +75,19 @@ function App() {
     vehiclePhoto: null,
     otherInsurancePhoto: null,
   })
-  const [otherPartyInvolved, setOtherPartyInvolved] = useState<'yes' | 'no' | ''>('')
+  const [hasOtherParty, setHasOtherParty] = useState<boolean | null>(null)
   const [otherPartyStatus, setOtherPartyStatus] = useState<'still' | 'left' | ''>('')
+  const [otherPartyDetails, setOtherPartyDetails] = useState<OtherPartyDetails>({
+    noInfo: false,
+    otherDriverName: '',
+    otherContact: '',
+    otherVehiclePlate: '',
+    otherVehicleState: '',
+    otherVehicleMakeModel: '',
+    insuranceCarrier: '',
+    policyNumber: '',
+    notes: '',
+  })
   const [confirmedIdentifier, setConfirmedIdentifier] = useState<{
     mode: 'plate' | 'vin'
     plate?: string
@@ -103,6 +120,11 @@ function App() {
     submittedAt: string
     vehicle: Vehicle
     photos: { damage: boolean; vehicle: boolean; otherInsurance: boolean }
+    hasOtherParty?: boolean | null
+    otherPartyDetails?: OtherPartyDetails | null
+    incidentDescription?: string
+    incidentNarrationText?: string
+    incidentNarrationAccepted?: boolean
     estimate?: {
       estimatedRepairCost: number
       aboveDeductible: boolean
@@ -132,6 +154,31 @@ function App() {
   const [emergencyTranscript, setEmergencyTranscript] = useState('')
   const [emergencySummary, setEmergencySummary] = useState('')
   const [viewMode, setViewMode] = useState<'app' | 'tow' | 'insurer'>('app')
+  const [incidentDescription, setIncidentDescription] = useState('')
+  const [incidentNarrator, setIncidentNarrator] = useState<{
+    narration: string
+    accepted: boolean
+    edits?: Partial<NarratorFacts>
+  } | null>(null)
+
+  const steps = useMemo(() => {
+    const includeOtherParty = hasOtherParty === true
+    return {
+      total: includeOtherParty ? 12 : 11,
+      prelude: 1,
+      emergency: 2,
+      incident: 3,
+      photos: 4,
+      identifier: 5,
+      vehicleConfirm: 6,
+      otherParty: includeOtherParty ? 7 : null,
+      summary: includeOtherParty ? 8 : 7,
+      thinking: includeOtherParty ? 9 : 8,
+      assessment: includeOtherParty ? 10 : 9,
+      drivable: includeOtherParty ? 11 : 10,
+      submit: includeOtherParty ? 12 : 11,
+    }
+  }, [hasOtherParty])
 
   useEffect(() => {
     let active = true
@@ -228,7 +275,7 @@ function App() {
     setManualMake('')
     setManualModel('')
     setLookupKey((prev) => prev + 1)
-    setCurrentStep(5)
+    setCurrentStep(steps.vehicleConfirm)
   }
 
   const handleRunAssessment = async () => {
@@ -354,10 +401,17 @@ function App() {
     setEmergencyNotes(sample)
   }
 
+  const emergencyLocationLookup = useMemo(() => {
+    if (!emergencyLocation) {
+      return null
+    }
+    return mockLookupLocation({ lat: emergencyLocation.lat, lng: emergencyLocation.lng })
+  }, [emergencyLocation])
+
   useEffect(() => {
     const details = emergencyTranscript || emergencyNotes
-    const locationText = emergencyLocation
-      ? `Location: ${emergencyLocation.lat.toFixed(4)}, ${emergencyLocation.lng.toFixed(4)}.`
+    const locationText = emergencyLocationLookup
+      ? `Location: ${emergencyLocationLookup.formattedAddress} (nearest cross street: ${emergencyLocationLookup.nearestCrossStreet}).`
       : emergencyManualLocation
         ? `Location details: ${emergencyManualLocation}.`
         : ''
@@ -367,7 +421,7 @@ function App() {
     }
     const summary = `Summary: ${details || 'Crash reported.'}${locationText ? ` ${locationText}` : ''}`
     setEmergencySummary(summary)
-  }, [emergencyLocation, emergencyManualLocation, emergencyNotes, emergencyTranscript])
+  }, [emergencyLocationLookup, emergencyManualLocation, emergencyNotes, emergencyTranscript])
 
   const handleSubmitClaim = async () => {
     if (!vehicleResult || isSubmitting || claimRecord) {
@@ -375,6 +429,9 @@ function App() {
     }
     setIsSubmitting(true)
     try {
+      const incidentNarrationText = incidentNarrator?.accepted
+        ? incidentNarrator.narration.trim()
+        : undefined
       const claimPayload = {
         vehicle: vehicleResult,
         drivable,
@@ -391,6 +448,11 @@ function App() {
               insurerPays: estimateSummary.insurerPays,
             }
           : null,
+        hasOtherParty,
+        otherPartyDetails: hasOtherParty ? otherPartyDetails : null,
+        incidentDescription: incidentDescription.trim() ? incidentDescription.trim() : undefined,
+        incidentNarrationText: incidentNarrationText ? incidentNarrationText : undefined,
+        incidentNarrationAccepted: Boolean(incidentNarrator?.accepted),
         tow: tow ? { requested: Boolean(tow.towId), status: tow.status } : undefined,
       }
       const response = await submitClaim(claimPayload)
@@ -438,8 +500,93 @@ function App() {
     assessment !== null &&
     policyHolder
 
+  const copilotCtx: CopilotContext = {
+    drivable,
+    assessment: assessment
+      ? {
+          severity: assessment.severity,
+          confidence: assessment.confidence,
+          damageType: assessment.damageTypes,
+        }
+      : undefined,
+    vehicle: vehicleResult
+      ? {
+          year: vehicleResult.year,
+          make: vehicleResult.make,
+          model: vehicleResult.model,
+          bodyType: vehicleResult.bodyType,
+        }
+      : undefined,
+    estimate: estimateSummary
+      ? {
+          estimatedRepairCost: estimateSummary.estimatedRepairCost,
+          aboveDeductible: estimateSummary.aboveDeductible,
+          isPotentialTotalLoss: estimateSummary.isPotentialTotalLoss,
+        }
+      : undefined,
+  }
+  const mode = computeUrgencyMode(copilotCtx)
+
+  const otherPartySummary = useMemo(() => {
+    if (hasOtherParty !== true) {
+      return undefined
+    }
+    const bits: string[] = []
+    if (otherPartyDetails.otherDriverName.trim()) {
+      bits.push(otherPartyDetails.otherDriverName.trim())
+    }
+    if (otherPartyDetails.otherVehiclePlate.trim()) {
+      const state = otherPartyDetails.otherVehicleState.trim()
+      bits.push(state ? `${otherPartyDetails.otherVehiclePlate.trim()} (${state})` : otherPartyDetails.otherVehiclePlate.trim())
+    }
+    if (otherPartyDetails.otherVehicleMakeModel.trim()) {
+      bits.push(otherPartyDetails.otherVehicleMakeModel.trim())
+    }
+    return bits.length > 0 ? bits.slice(0, 3).join(' • ') : 'Other party details provided'
+  }, [hasOtherParty, otherPartyDetails.otherDriverName, otherPartyDetails.otherVehicleMakeModel, otherPartyDetails.otherVehiclePlate, otherPartyDetails.otherVehicleState])
+
+  const narratorFacts: NarratorFacts = useMemo(
+    () => ({
+      hasOtherParty: hasOtherParty ?? undefined,
+      otherPartySummary,
+      drivable,
+      assessment: assessment
+        ? {
+            severity: assessment.severity,
+            confidence: assessment.confidence,
+            damageType: assessment.damageTypes,
+          }
+        : undefined,
+      vehicle: vehicleResult
+        ? {
+            year: vehicleResult.year,
+            make: vehicleResult.make,
+            model: vehicleResult.model,
+            bodyType: vehicleResult.bodyType,
+          }
+        : undefined,
+      estimate: estimateSummary
+        ? {
+            estimatedRepairCost: estimateSummary.estimatedRepairCost,
+            aboveDeductible: estimateSummary.aboveDeductible,
+            isPotentialTotalLoss: estimateSummary.isPotentialTotalLoss,
+          }
+        : undefined,
+      userNotes: incidentNarrator?.edits?.userNotes ?? undefined,
+    }),
+    [
+      assessment,
+      drivable,
+      estimateSummary,
+      hasOtherParty,
+      incidentNarrator?.edits?.userNotes,
+      otherPartySummary,
+      vehicleResult,
+    ],
+  )
+
   useEffect(() => {
-    if (currentStep !== 5) {
+    if (currentStep !== steps.vehicleConfirm) {
       return
     }
     if (useManualVehicleEntry) {
@@ -491,7 +638,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [confirmedIdentifier, currentStep, lookupKey, useManualVehicleEntry, vehicleResult])
+  }, [confirmedIdentifier, currentStep, lookupKey, useManualVehicleEntry, vehicleResult, steps])
 
   const canConfirmVehicleDetails = useMemo(() => {
     return Boolean(manualYear && manualMake && manualModel)
@@ -541,40 +688,45 @@ function App() {
 
   const maxAllowedStep = useMemo(() => {
     if (!selectedScenarioId) {
-      return 1
+      return steps.prelude
     }
     if (!emergencyAnswer) {
-      return 2
+      return steps.emergency
+    }
+    if (hasOtherParty === null) {
+      return steps.incident
     }
     if (!step1Complete) {
-      return 3
+      return steps.photos
     }
     if (!confirmedIdentifier && !useManualVehicleEntry) {
-      return 4
+      return steps.identifier
     }
     if (!vehicleResult) {
-      return 5
+      return steps.vehicleConfirm
     }
     if (!readyForAssessment) {
-      return 6
+      return steps.summary
     }
     if (!assessment) {
-      return 8
+      return steps.thinking
     }
     if (drivable === null) {
-      return 9
+      return steps.drivable
     }
-    return 10
+    return steps.submit
   }, [
     assessment,
     confirmedIdentifier,
     drivable,
     emergencyAnswer,
+    hasOtherParty,
     readyForAssessment,
     selectedScenarioId,
     step1Complete,
     useManualVehicleEntry,
     vehicleResult,
+    steps,
   ])
 
   useEffect(() => {
@@ -586,35 +738,41 @@ function App() {
   }, [currentStep])
 
   const canGoNext = useMemo(() => {
-    if (currentStep === 1) {
+    if (currentStep === steps.prelude) {
       return Boolean(selectedScenarioId)
     }
-    if (currentStep === 2) {
+    if (currentStep === steps.emergency) {
       return emergencyAnswer !== ''
     }
-    if (currentStep === 3) {
+    if (currentStep === steps.incident) {
+      return hasOtherParty !== null
+    }
+    if (currentStep === steps.photos) {
       return step1Complete
     }
-    if (currentStep === 4) {
+    if (currentStep === steps.identifier) {
       return step1Complete && (confirmedIdentifier !== null || useManualVehicleEntry)
     }
-    if (currentStep === 5) {
+    if (currentStep === steps.vehicleConfirm) {
       return (
         step1Complete &&
         (confirmedIdentifier !== null || useManualVehicleEntry) &&
         vehicleResult !== null
       )
     }
-    if (currentStep === 6) {
+    if (steps.otherParty && currentStep === steps.otherParty) {
+      return true
+    }
+    if (currentStep === steps.summary) {
       return readyForAssessment && !isAssessing
     }
-    if (currentStep === 7) {
+    if (currentStep === steps.thinking) {
       return false
     }
-    if (currentStep === 8) {
+    if (currentStep === steps.assessment) {
       return assessment !== null && !isAssessing
     }
-    if (currentStep === 9) {
+    if (currentStep === steps.drivable) {
       return drivable !== null
     }
     return false
@@ -624,74 +782,113 @@ function App() {
     assessment,
     drivable,
     emergencyAnswer,
+    hasOtherParty,
     isAssessing,
     readyForAssessment,
     selectedScenarioId,
     step1Complete,
     useManualVehicleEntry,
     vehicleResult,
+    steps,
   ])
 
   const { headerTitle, headerSubtitle } = useMemo(() => {
-    if (currentStep === 1) {
+    if (currentStep === steps.prelude) {
       return {
         headerTitle: 'Start your claim',
         headerSubtitle: 'We will set up your policy details before we begin.',
       }
     }
-    if (currentStep === 2) {
+    if (currentStep === steps.emergency) {
       return {
         headerTitle: 'Emergency check',
         headerSubtitle: 'We can get help to you quickly if needed.',
       }
     }
-    if (currentStep === 3) {
+    if (currentStep === steps.incident) {
       return {
-        headerTitle: 'Upload photos',
-        headerSubtitle: `${namePrefix}let's grab a few details to get started.`,
+        headerTitle: 'Incident basics',
+        headerSubtitle: "Only share what you have. You can add details later.",
       }
     }
-    if (currentStep === 4) {
+    if (currentStep === steps.photos) {
+      return {
+        headerTitle: 'Upload photos',
+        headerSubtitle:
+          mode === 'urgent'
+            ? `${namePrefix}we'll prioritize safety and logistics. Add photos when you can.`
+            : mode === 'minor'
+              ? `${namePrefix}let's keep this quick—just a few photos to start.`
+              : `${namePrefix}let's grab a few details to get started.`,
+      }
+    }
+    if (currentStep === steps.identifier) {
       return {
         headerTitle: 'Enter plate or VIN',
         headerSubtitle: "If you don't have your plate handy, your VIN works too. Either is fine.",
       }
     }
-    if (currentStep === 5) {
+    if (currentStep === steps.vehicleConfirm) {
       return {
         headerTitle: 'Confirm your vehicle',
         headerSubtitle: 'We will use this to match the right repair guidance.',
       }
     }
-    if (currentStep === 6) {
+    if (steps.otherParty && currentStep === steps.otherParty) {
       return {
-        headerTitle: 'Summary',
-        headerSubtitle: 'Quick check before we generate a preliminary assessment.',
+        headerTitle: 'Other party details',
+        headerSubtitle: "Only share what you have. You can add it later.",
       }
     }
-    if (currentStep === 7) {
+    if (currentStep === steps.summary) {
+      return {
+        headerTitle: 'Summary',
+        headerSubtitle:
+          mode === 'urgent'
+            ? 'Quick check—then we will focus on safety and logistics.'
+            : mode === 'minor'
+              ? "Quick check—then we'll generate a preliminary estimate."
+              : 'Quick check before we generate a preliminary assessment.',
+      }
+    }
+    if (currentStep === steps.thinking) {
       return {
         headerTitle: 'Generating your assessment',
         headerSubtitle: 'Just a moment - we are pulling everything together.',
       }
     }
-    if (currentStep === 8) {
+    if (currentStep === steps.assessment) {
       return {
         headerTitle: 'Damage assessment',
-        headerSubtitle: `${namePrefix}this is a preliminary estimate. A shop will confirm final cost.`,
+        headerSubtitle:
+          mode === 'urgent'
+            ? `${namePrefix}safety first—we can help coordinate tow and a ride if needed. A shop will confirm final cost.`
+            : mode === 'minor'
+              ? `${namePrefix}quick overview—then we'll wrap up the claim. A shop will confirm final cost.`
+              : `${namePrefix}this is a preliminary estimate. A shop will confirm final cost.`,
       }
     }
-    if (currentStep === 9) {
+    if (currentStep === steps.drivable) {
       return {
         headerTitle: 'Is the car drivable?',
-        headerSubtitle: 'If you are unsure, choose not safe. We can help.',
+        headerSubtitle:
+          mode === 'urgent'
+            ? 'Your safety comes first. If you are unsure, choose not safe—we can help with towing and a ride.'
+            : mode === 'minor'
+              ? 'Quick safety check—then you can submit your claim.'
+              : 'If you are unsure, choose not safe. We can help.',
       }
     }
     return {
       headerTitle: 'Submit claim',
-      headerSubtitle: 'We will keep you updated once it is submitted.',
+      headerSubtitle:
+        mode === 'urgent'
+          ? "We'll help with the logistics and keep you updated once it is submitted."
+          : mode === 'minor'
+            ? "Just a couple taps—then you're done. We'll keep you updated once it is submitted."
+            : 'We will keep you updated once it is submitted.',
     }
-  }, [currentStep, namePrefix])
+  }, [currentStep, mode, namePrefix, steps])
 
   const handleBack = () => {
     setCurrentStep((prev) => Math.max(1, prev - 1))
@@ -701,8 +898,19 @@ function App() {
     setViewMode('app')
     setCurrentStep(1)
     setPhotos({ damagePhoto: [], vehiclePhoto: null, otherInsurancePhoto: null })
-    setOtherPartyInvolved('')
+    setHasOtherParty(null)
     setOtherPartyStatus('')
+    setOtherPartyDetails({
+      noInfo: false,
+      otherDriverName: '',
+      otherContact: '',
+      otherVehiclePlate: '',
+      otherVehicleState: '',
+      otherVehicleMakeModel: '',
+      insuranceCarrier: '',
+      policyNumber: '',
+      notes: '',
+    })
     setConfirmedIdentifier(null)
     setLookupKey((prev) => prev + 1)
     setVehicleResult(null)
@@ -737,55 +945,62 @@ function App() {
     setEmergencyManualLocation('')
     setEmergencyTranscript('')
     setEmergencySummary('')
+    setIncidentDescription('')
   }
 
   const handleNext = async () => {
     if (!canGoNext) {
       return
     }
-    if (currentStep === 6) {
+    if (currentStep === steps.summary) {
       if (!assessment && readyForAssessment && !isAssessing) {
         await handleRunAssessment()
       }
-      setCurrentStep(7)
+      setCurrentStep(steps.thinking)
       return
     }
-    setCurrentStep((prev) => Math.min(TOTAL_STEPS, prev + 1))
+    setCurrentStep((prev) => Math.min(steps.total, prev + 1))
   }
 
   const nextLabel = useMemo(() => {
-    if (currentStep === 1) {
+    if (currentStep === steps.prelude) {
       return 'Start claim'
     }
-    if (currentStep === 2) {
+    if (currentStep === steps.emergency) {
+      return 'Next: Incident basics'
+    }
+    if (currentStep === steps.incident) {
       return 'Next: Upload photos'
     }
-    if (currentStep === 3) {
+    if (currentStep === steps.photos) {
       return 'Next: Enter plate or VIN'
     }
-    if (currentStep === 4) {
+    if (currentStep === steps.identifier) {
       return 'Next: Lookup vehicle'
     }
-    if (currentStep === 5) {
+    if (currentStep === steps.vehicleConfirm) {
+      return steps.otherParty ? 'Next: Other party info' : 'Next: Summary'
+    }
+    if (steps.otherParty && currentStep === steps.otherParty) {
       return 'Next: Summary'
     }
-    if (currentStep === 6) {
+    if (currentStep === steps.summary) {
       return 'Generate assessment ✨'
     }
-    if (currentStep === 7) {
+    if (currentStep === steps.thinking) {
       return 'Working on your assessment...'
     }
-    if (currentStep === 8) {
+    if (currentStep === steps.assessment) {
       return 'Next: Drivable check'
     }
-    if (currentStep === 9) {
+    if (currentStep === steps.drivable) {
       return 'Next: Submit claim'
     }
     return 'Next: Submit claim'
-  }, [currentStep])
+  }, [currentStep, steps])
 
   useEffect(() => {
-    if (currentStep !== 7) {
+    if (currentStep !== steps.thinking) {
       return
     }
     setThinkingStepIndex(0)
@@ -793,13 +1008,13 @@ function App() {
       setThinkingStepIndex((prev) => (prev + 1) % 3)
     }, 1300)
     const timeout = window.setTimeout(() => {
-      setCurrentStep(8)
+      setCurrentStep(steps.assessment)
     }, 4200)
     return () => {
       window.clearInterval(cycle)
       window.clearTimeout(timeout)
     }
-  }, [currentStep])
+  }, [currentStep, steps])
 
   const vehicleLabel = vehicleResult
     ? `${vehicleResult.year} ${vehicleResult.make} ${vehicleResult.model}`
@@ -817,9 +1032,19 @@ function App() {
     : useManualVehicleEntry
       ? 'Manual entry'
       : 'Not provided'
-  const pickupLocationLabel = emergencyLocation
-    ? `${emergencyLocation.lat.toFixed(4)}, ${emergencyLocation.lng.toFixed(4)}`
+  const pickupLocationLabel = emergencyLocationLookup
+    ? `${emergencyLocationLookup.formattedAddress} (near ${emergencyLocationLookup.nearestCrossStreet})`
     : emergencyManualLocation || 'Not provided'
+  const pickupDestination = emergencyLocationLookup
+    ? emergencyLocationLookup.mapsQuery
+    : emergencyManualLocation.trim()
+  const hasPickupDestination = pickupDestination.length > 0
+  const googleMapsDirectionsUrl = hasPickupDestination
+    ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(pickupDestination)}`
+    : ''
+  const appleMapsDirectionsUrl = hasPickupDestination
+    ? `https://maps.apple.com/?daddr=${encodeURIComponent(pickupDestination)}`
+    : ''
   const emergencyNotesLabel =
     emergencySummary || emergencyTranscript || emergencyNotes || 'No emergency notes provided.'
   const towStatusLabel = tow?.status ?? (drivable === false ? 'Not requested' : 'Not needed')
@@ -887,6 +1112,35 @@ function App() {
                         {drivable === null ? 'Unknown' : drivable ? 'Yes' : 'No'}
                       </span>
                     </div>
+                  </div>
+                  <div className="field-group">
+                    <h3>Location</h3>
+                    <p className="muted">{pickupLocationLabel}</p>
+                    {hasPickupDestination ? (
+                      <>
+                        <div className="lookup__actions">
+                          <a
+                            className="button button--primary"
+                            href={googleMapsDirectionsUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Get driving directions
+                          </a>
+                          <a
+                            className="button button--ghost"
+                            href={appleMapsDirectionsUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open in Apple Maps
+                          </a>
+                        </div>
+                        <p className="muted">Opens your maps app in a new tab.</p>
+                      </>
+                    ) : (
+                      <p className="muted">Pickup location not provided yet.</p>
+                    )}
                   </div>
                   <div className="field-group">
                     <h3>Notes for driver</h3>
@@ -1008,6 +1262,62 @@ function App() {
                       </div>
                     </div>
                   </div>
+                  {hasOtherParty && otherPartyDetails && (
+                    <div className="field-group">
+                      <h3>Other party details</h3>
+                      {otherPartyDetails.noInfo ? (
+                        <p className="muted">Policyholder indicated they do not have this info.</p>
+                      ) : (
+                        <div className="summary summary--compact">
+                          <div>
+                            <span className="summary__label">Driver name</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.otherDriverName || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Contact</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.otherContact || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Plate</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.otherVehiclePlate || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">State</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.otherVehicleState || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Vehicle</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.otherVehicleMakeModel || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Carrier</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.insuranceCarrier || 'Not provided'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="summary__label">Policy #</span>
+                            <span className="summary__value">
+                              {otherPartyDetails.policyNumber || 'Not provided'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      {otherPartyDetails.notes && (
+                        <p className="muted">Notes: {otherPartyDetails.notes}</p>
+                      )}
+                    </div>
+                  )}
                   <div className="field-group">
                     <h3>Estimate summary</h3>
                     <div className="summary summary--compact">
@@ -1059,6 +1369,16 @@ function App() {
               )}
             </div>
           </section>
+          <footer className="app__footer">
+            <a
+              className="app__footerLink"
+              href="https://www.linkedin.com/in/darinlaframboise/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              This is a project by Darin LaFramboise
+            </a>
+          </footer>
         </main>
       </div>
     )
@@ -1088,26 +1408,32 @@ function App() {
           </button>
         </div>
         <header className="app__brand">
-          <img
-            src={fenderbenderLogo}
-            alt="FenderBender Mutual logo"
-            className="app__brandLogo"
-          />
-          <div className="app__brandText">
-            <span className="app__brandName">FenderBender Mutual</span>
-            <span className="app__brandTag">Claim Assist</span>
+          <div className="app__brandMain">
+            <div className="app__brandMark" aria-hidden="true">
+              <img
+                src={fenderbenderLogo}
+                alt=""
+                className="app__brandLogo"
+              />
+            </div>
+            <div className="app__brandText">
+              <span className="app__brandName">FenderBender Mutual</span>
+              <span className="app__brandTag">
+                Claim Assist
+              </span>
+            </div>
           </div>
         </header>
         <ProgressHeader
           currentStep={currentStep}
-          totalSteps={TOTAL_STEPS}
+          totalSteps={steps.total}
           title={headerTitle}
           subtitle={headerSubtitle}
         />
 
         <section className="panel panel--step">
           <div className="panel__body">
-            {currentStep === 1 && (
+            {currentStep === steps.prelude && (
               <div className="form-grid">
                 {USE_NEW_ESTIMATE && scenarioOptions.length > 0 && (
                   <fieldset className="field-group">
@@ -1140,7 +1466,7 @@ function App() {
               </div>
             )}
 
-            {currentStep === 2 && (
+            {currentStep === steps.emergency && (
               <div className="form-grid">
                 <div className="support callout">
                   <p className="support__headline">
@@ -1173,9 +1499,9 @@ function App() {
                         <p className="support__headline">
                           Help is on the way. Keep your phone handy in case responders contact you.
                         </p>
-                        <p className="muted">
-                          {emergencyLocation
-                            ? `Location captured (${emergencyLocation.lat.toFixed(4)}, ${emergencyLocation.lng.toFixed(4)}).`
+                          <p className="muted">
+                          {emergencyLocationLookup
+                            ? `Location captured (${emergencyLocationLookup.formattedAddress}). Nearest cross street: ${emergencyLocationLookup.nearestCrossStreet}.`
                             : `Location shared: ${emergencyManualLocation || 'Provided by user'}.`}
                         </p>
                       </div>
@@ -1212,9 +1538,14 @@ function App() {
                           >
                             {emergencyLoading ? 'Getting location...' : 'Use my location'}
                           </button>
-                          {emergencyLocation ? (
+                          {emergencyLocationLookup ? (
                             <div className="callout">
-                              Location: {emergencyLocation.lat.toFixed(4)}, {emergencyLocation.lng.toFixed(4)}
+                              <div>
+                                <strong>Estimated location:</strong> {emergencyLocationLookup.formattedAddress}
+                              </div>
+                              <div className="muted">
+                                Nearest cross street: {emergencyLocationLookup.nearestCrossStreet}
+                              </div>
                             </div>
                           ) : (
                             <label className="field">
@@ -1272,40 +1603,34 @@ function App() {
               </div>
             )}
 
-            {currentStep === 3 && (
+            {currentStep === steps.incident && (
               <>
                 <div className="support callout">
                   <p className="support__headline">
-                    {namePrefix}you're safe. Let's take this one step at a time.
+                    {namePrefix}only share what you have. You can add details later.
                   </p>
-                  <p className="muted">No need to be perfect - we'll guide you.</p>
-                  <p className="muted">
-                    Let's grab some information. If someone else is involved, add their insurance card.
-                  </p>
+                  <p className="muted">If another vehicle or person was involved, let us know here.</p>
                 </div>
-
                 <fieldset className="field-group">
                   <legend>Other party</legend>
                   <p className="field__hint">
                     Only ask for someone else's information if it is safe and appropriate.
                   </p>
                   <div className="field">
-                    <span className="field__label">Was another car or person involved?</span>
+                    <span className="field__label">Was another vehicle or person involved?</span>
                     <div className="form-grid form-grid--three">
                       <button
                         type="button"
-                        className={`button ${otherPartyInvolved === 'yes' ? 'button--primary' : 'button--ghost'}`}
-                        onClick={() => {
-                          setOtherPartyInvolved('yes')
-                        }}
+                        className={`button ${hasOtherParty === true ? 'button--primary' : 'button--ghost'}`}
+                        onClick={() => setHasOtherParty(true)}
                       >
                         Yes
                       </button>
                       <button
                         type="button"
-                        className={`button ${otherPartyInvolved === 'no' ? 'button--primary' : 'button--ghost'}`}
+                        className={`button ${hasOtherParty === false ? 'button--primary' : 'button--ghost'}`}
                         onClick={() => {
-                          setOtherPartyInvolved('no')
+                          setHasOtherParty(false)
                           setOtherPartyStatus('')
                         }}
                       >
@@ -1313,7 +1638,7 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  {otherPartyInvolved === 'yes' && (
+                  {hasOtherParty === true && (
                     <div className="field">
                       <span className="field__label">Are they still there?</span>
                       <div className="form-grid form-grid--three">
@@ -1335,33 +1660,42 @@ function App() {
                     </div>
                   )}
                 </fieldset>
-
-                {otherPartyInvolved && (
-                  <PhotoChecklistUploader
-                    photos={{
-                      ...photos,
-                      otherInsurancePhoto:
-                        otherPartyInvolved === 'yes' && otherPartyStatus === 'still'
-                          ? photos.otherInsurancePhoto
-                          : null,
-                    }}
-                    includeOtherInsurance={
-                      otherPartyInvolved === 'yes' && otherPartyStatus === 'still'
-                    }
-                    onPhotoChange={(key, file) => {
-                      if (key === 'otherInsurancePhoto') {
-                        if (otherPartyInvolved !== 'yes' || otherPartyStatus !== 'still') {
-                          return
-                        }
-                      }
-                      handlePhotoChange(key, file)
-                    }}
-                  />
-                )}
               </>
             )}
 
-            {currentStep === 4 && (
+            {currentStep === steps.photos && (
+              <>
+                <div className="support callout">
+                  <p className="support__headline">
+                    {namePrefix}you're safe. Let's take this one step at a time.
+                  </p>
+                  <p className="muted">No need to be perfect - we'll guide you.</p>
+                  <p className="muted">
+                    Let's grab some information. If someone else is involved, add their insurance card.
+                  </p>
+                </div>
+                <PhotoChecklistUploader
+                  photos={{
+                    ...photos,
+                    otherInsurancePhoto:
+                      hasOtherParty === true && otherPartyStatus === 'still'
+                        ? photos.otherInsurancePhoto
+                        : null,
+                  }}
+                  includeOtherInsurance={hasOtherParty === true && otherPartyStatus === 'still'}
+                  onPhotoChange={(key, file) => {
+                    if (key === 'otherInsurancePhoto') {
+                      if (hasOtherParty !== true || otherPartyStatus !== 'still') {
+                        return
+                      }
+                    }
+                    handlePhotoChange(key, file)
+                  }}
+                />
+              </>
+            )}
+
+            {currentStep === steps.identifier && (
               <>
                 <div className="support callout">
                   <p className="support__headline">
@@ -1384,7 +1718,7 @@ function App() {
                       setManualYear('')
                       setManualMake('')
                       setManualModel('')
-                      setCurrentStep(5)
+                      setCurrentStep(steps.vehicleConfirm)
                     }}
                   >
                     Enter vehicle details manually
@@ -1394,7 +1728,7 @@ function App() {
               </>
             )}
 
-            {currentStep === 5 && (
+            {currentStep === steps.vehicleConfirm && (
               <>
                 <div className="lookup__actions">
                   <button
@@ -1402,7 +1736,7 @@ function App() {
                     className="button button--ghost"
                     onClick={() => {
                       if (useManualVehicleEntry) {
-                        setCurrentStep(4)
+                        setCurrentStep(steps.identifier)
                         return
                       }
                       setUseManualVehicleEntry(true)
@@ -1572,7 +1906,11 @@ function App() {
               </>
             )}
 
-            {currentStep === 6 && (
+            {steps.otherParty && currentStep === steps.otherParty && (
+              <OtherPartyInfo value={otherPartyDetails} onChange={setOtherPartyDetails} />
+            )}
+
+            {currentStep === steps.summary && (
               <div className="form-grid">
                 {USE_NEW_ESTIMATE && policyHolder && (
                   <PolicySummary
@@ -1646,11 +1984,11 @@ function App() {
                 <div>
                   <span className="summary__label">Other party involved</span>
                   <span className="summary__value">
-                    {otherPartyInvolved
-                      ? otherPartyInvolved === 'yes'
+                    {hasOtherParty === null
+                      ? 'Not answered'
+                      : hasOtherParty
                         ? `Yes${otherPartyStatus ? `, ${otherPartyStatus === 'still' ? 'still there' : 'drove off'}` : ''}`
-                        : 'No'
-                      : 'Not answered'}
+                        : 'No'}
                   </span>
                 </div>
                 <div>
@@ -1663,7 +2001,7 @@ function App() {
               </div>
             )}
 
-            {currentStep === 7 && (
+            {currentStep === steps.thinking && (
               <div className="form-grid">
                 <div className="support callout">
                   <div className="ai-sparkle" />
@@ -1688,7 +2026,7 @@ function App() {
               </div>
             )}
 
-            {currentStep === 8 && (
+            {currentStep === steps.assessment && (
               <>
                 <div className="assessment__controls">
                   <p className="muted">
@@ -1719,7 +2057,7 @@ function App() {
               </>
             )}
 
-            {currentStep === 9 && (
+            {currentStep === steps.drivable && (
               <>
                 <DrivableCheck
                   value={drivable}
@@ -1731,7 +2069,7 @@ function App() {
               </>
             )}
 
-            {currentStep === 10 && (
+            {currentStep === steps.submit && (
               <>
                 {!claimRecord ? (
                   <div className="form-grid">
@@ -1744,6 +2082,20 @@ function App() {
                         estimatedRepairCost={estimatedRepairCost ?? undefined}
                       />
                     )}
+                    {assessment && vehicleResult && (
+                      <IncidentNarratorCard
+                        facts={narratorFacts}
+                        value={incidentNarrator}
+                        onChange={setIncidentNarrator}
+                      />
+                    )}
+                    <IncidentDescription
+                      ctx={copilotCtx}
+                      value={incidentDescription}
+                      onChange={setIncidentDescription}
+                      hasOtherParty={hasOtherParty ?? undefined}
+                      otherParty={hasOtherParty ? otherPartyDetails : undefined}
+                    />
                     <SubmitClaimCard
                       vehicle={vehicleResult}
                       drivable={drivable}
@@ -1795,11 +2147,11 @@ function App() {
                 type="button"
                 className="button button--ghost"
                 onClick={handleBack}
-                disabled={currentStep === 1}
+                disabled={currentStep === steps.prelude}
               >
                 Back
               </button>
-              {currentStep < TOTAL_STEPS && (
+              {currentStep < steps.total && (
                 <button
                   type="button"
                   className="button button--primary"
@@ -1812,6 +2164,16 @@ function App() {
             </div>
           </div>
         </section>
+        <footer className="app__footer">
+          <a
+            className="app__footerLink"
+            href="https://www.linkedin.com/in/darinlaframboise/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            This is a project by Darin LaFramboise
+          </a>
+        </footer>
       </main>
     </div>
   )

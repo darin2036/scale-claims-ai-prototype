@@ -23,17 +23,39 @@
 .app__brand {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 12px;
-  background: #fff;
+  background: #ffffff;
   border: 1px solid var(--border);
+  border-bottom-color: rgba(15, 23, 42, 0.08);
   border-radius: 18px;
-  padding: 12px 16px;
-  box-shadow: var(--shadow);
+  padding: 10px 14px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+}
+
+.app__brandMain {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.app__brandMark {
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+  flex: 0 0 auto;
 }
 
 .app__brandLogo {
-  height: 32px;
-  width: auto;
+  height: 28px;
+  width: 28px;
+  object-fit: contain;
+  display: block;
 }
 
 .app__brandText {
@@ -43,13 +65,44 @@
 }
 
 .app__brandName {
-  font-weight: 700;
+  font-weight: 650;
   color: var(--ink);
+  font-size: 1.02rem;
+  line-height: 1.1;
 }
 
 .app__brandTag {
-  font-size: 0.85rem;
+  font-size: 0.83rem;
   color: var(--muted);
+  line-height: 1.2;
+}
+
+.ai-guided-pill {
+  background: rgba(21, 101, 216, 0.1);
+  color: var(--brand-blue);
+  border: 1px solid rgba(21, 101, 216, 0.18);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.app__footer {
+  display: flex;
+  justify-content: center;
+  padding-bottom: 8px;
+}
+
+.app__footerLink {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  text-decoration: none;
+}
+
+.app__footerLink:hover {
+  color: var(--brand-blue);
+  text-decoration: underline;
 }
 
 .progress-header {
@@ -146,6 +199,8 @@
   background: none;
   color: var(--brand-blue);
   font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.2;
   text-decoration: underline;
   cursor: pointer;
   min-height: 44px;
@@ -340,6 +395,8 @@
   border-radius: 12px;
   padding: 12px 18px;
   font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.1;
   cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
   min-height: 44px;
@@ -862,12 +919,13 @@
   }
 
   .app__brand {
-    flex-direction: column;
-    align-items: flex-start;
+    padding: 10px 12px;
+    gap: 10px;
   }
 
   .app__brandLogo {
-    height: 28px;
+    height: 26px;
+    width: 26px;
   }
 
   .progress-header__title {
@@ -919,5 +977,20 @@
   .preview-card {
     grid-template-columns: 1fr;
     overflow: hidden;
+  }
+}
+
+@media (min-width: 721px) {
+  .app__brandLogo {
+    height: 34px;
+    width: 34px;
+  }
+
+  .button {
+    font-size: 1rem;
+  }
+
+  .link-button {
+    font-size: 1rem;
   }
 }
