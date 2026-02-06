@@ -79,6 +79,15 @@ After submission, the app provides immediate next steps:
 - Rental car recommendation based on repair duration
 - Nearby repair shop suggestions
 
+### Claims Agent Review Mode
+A separate **Claims Agent Review** route (`/agent`) demonstrates the internal handling workflow after customer intake:
+- Customer upload/submission appears in an agent queue (with mocked claims)
+- Agent runs AI damage assessment (areas, severity, confidence, next step)
+- AI suggests a severity-based estimate band
+- Agent finalizes repair estimate, adds notes, and authorizes repairs
+
+This view explicitly demonstrates a human‑in‑the‑loop AI workflow: AI provides recommendations, and the claims agent makes final decisions.
+
 ---
 
 ## AI‑Driven Elements (Mocked)

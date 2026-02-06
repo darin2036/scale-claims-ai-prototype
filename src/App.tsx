@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import './App.css'
 import fenderbenderLogo from './assets/fenderbender-logo.png'
 import PhotoChecklistUploader, {
@@ -27,6 +28,7 @@ import {
   lookupVehicleByIdentifier,
 } from './server/fakeApi'
 import { hashString } from './server/hash'
+import { persistMostRecentSubmissionFromCustomerFlow } from './components/agent/storage'
 import {
   bookRental,
   bookRideHome,
@@ -436,11 +438,6 @@ export default function App() {
     setEmergencyManualLocation('')
   }
 
-  const handleRestart = () => {
-    setViewMode('app')
-    resetFlow()
-  }
-
   const handleStartClaim = () => {
     resetFlow()
     setEmergencyLocation({ lat: 30.2672, lng: -97.7431, accuracy: 120 })
@@ -746,7 +743,26 @@ export default function App() {
         tow: tow ? { requested: Boolean(tow.towId), status: tow.status } : undefined,
       }
       const response = await submitClaim(claimPayload)
-      setClaimRecord({ claimId: response.claimId, submittedAt: response.submittedAt, ...claimPayload })
+      const nextClaimRecord = { claimId: response.claimId, submittedAt: response.submittedAt, ...claimPayload }
+      setClaimRecord(nextClaimRecord)
+      void persistMostRecentSubmissionFromCustomerFlow({
+        claimId: response.claimId,
+        submittedAt: response.submittedAt,
+        vehicle: claimPayload.vehicle,
+        drivable: claimPayload.drivable,
+        hasOtherParty: claimPayload.hasOtherParty ?? null,
+        policy: policyHolder
+          ? {
+              policyId: policyHolder.policy.policyId,
+              insuredName: policyHolder.name,
+              coverage: policyHolder.policy.coverage,
+              deductible: policyHolder.policy.deductible,
+              rentalCoverage: policyHolder.policy.rentalCoverage,
+            }
+          : undefined,
+        damagePhotos: photos.damagePhoto,
+        vehiclePhoto: photos.vehiclePhoto,
+      })
     } finally {
       setIsSubmitting(false)
     }
@@ -939,15 +955,19 @@ export default function App() {
       <div className="app">
         <main className="app__shell">
           <div className="app__reset">
-            <button type="button" className="link-button" onClick={handleRestart}>
-              Start workflow over
-            </button>
-            <button type="button" className="link-button" onClick={() => setViewMode('tow')}>
-              Tow driver view
-            </button>
-            <button type="button" className="link-button" onClick={() => setViewMode('insurer')}>
-              Insurer view
-            </button>
+            <div className="app__resetPrimary">
+              <Link to="/agent" className="link-button link-button--top">
+                Claims Agent Review
+              </Link>
+            </div>
+            <div className="app__resetSecondary">
+              <button type="button" className="link-button link-button--top" onClick={() => setViewMode('app')}>
+                Customer Workflow
+              </button>
+              <button type="button" className="link-button link-button--top" onClick={() => setViewMode('tow')}>
+                Tow driver view
+              </button>
+            </div>
           </div>
           <section className="panel panel--step">
             <div className="panel__body">
@@ -1361,15 +1381,19 @@ export default function App() {
     <div className="app">
       <main className="app__shell">
         <div className="app__reset">
-          <button type="button" className="link-button" onClick={handleRestart}>
-            Start workflow over
-          </button>
-          <button type="button" className="link-button" onClick={() => setViewMode('tow')}>
-            Tow driver view
-          </button>
-          <button type="button" className="link-button" onClick={() => setViewMode('insurer')}>
-            Insurer view
-          </button>
+          <div className="app__resetPrimary">
+            <Link to="/agent" className="link-button link-button--top">
+              Claims Agent Review
+            </Link>
+          </div>
+          <div className="app__resetSecondary">
+            <button type="button" className="link-button link-button--top" onClick={() => setViewMode('app')}>
+              Customer Workflow
+            </button>
+            <button type="button" className="link-button link-button--top" onClick={() => setViewMode('tow')}>
+              Tow driver view
+            </button>
+          </div>
         </div>
 
         <header className="app__brand">
