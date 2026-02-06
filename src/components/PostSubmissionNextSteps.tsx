@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { Policy, Vehicle } from '../server/fakeDb'
 import type { RepairShop, RentalBooking, RideBooking, TowStatus } from '../server/nextStepsApi'
 import { getRecommendedRepairShops } from '../server/nextStepsApi'
+import { recommendRentalDays } from '../lib/repairTimeEstimator'
 import enterpriseLogo from '../assets/enterprise_logo.png'
 import uberLogo from '../assets/uber_logo.png'
 import lyftLogo from '../assets/lyft_logo.png'
@@ -11,6 +12,7 @@ interface PostSubmissionNextStepsProps {
   drivable: boolean
   vehicle: Vehicle
   policy: Policy | null
+  repairTime?: { minDays: number; maxDays: number; confidence: number } | null
   tow: { towId?: string; status?: TowStatus } | null
   towDestination: 'home' | 'shop' | 'custom' | ''
   towCustomAddress: string
@@ -48,6 +50,7 @@ export default function PostSubmissionNextSteps({
   drivable,
   vehicle,
   policy,
+  repairTime = null,
   tow,
   towDestination,
   towCustomAddress,
@@ -62,7 +65,10 @@ export default function PostSubmissionNextSteps({
 }: PostSubmissionNextStepsProps) {
   const [shops, setShops] = useState<RepairShop[]>([])
   const [rentalStart, setRentalStart] = useState(getTomorrowDate())
-  const [rentalDays, setRentalDays] = useState(3)
+  const [rentalDays, setRentalDays] = useState(() =>
+    repairTime ? recommendRentalDays(repairTime.maxDays) : 3,
+  )
+  const [rentalDaysTouched, setRentalDaysTouched] = useState(false)
   const resolvedTowDestination = useMemo(() => {
     if (!towDestination) {
       return 'Not selected earlier.'
@@ -87,6 +93,20 @@ export default function PostSubmissionNextSteps({
     }
   }, [vehicle])
 
+  useEffect(() => {
+    if (!repairTime) {
+      return
+    }
+    if (rentalBooking) {
+      return
+    }
+    if (rentalDaysTouched) {
+      return
+    }
+    const nextDays = recommendRentalDays(repairTime.maxDays)
+    setRentalDays((prev) => (prev === nextDays ? prev : nextDays))
+  }, [rentalBooking, rentalDaysTouched, repairTime])
+
   const rentalCovered = policy?.rentalCoverage ?? false
   const rentalLabel = rentalCovered ? 'Covered by your policy' : 'May require approval'
 
@@ -104,6 +124,16 @@ export default function PostSubmissionNextSteps({
         <p className="support__headline">You did the right thing. We've got it from here.</p>
         <p className="muted">Your claim is submitted - we'll keep you updated.</p>
         <p className="muted">Claim ID: {claimId}</p>
+        {repairTime && (
+          <>
+            <p className="muted">
+              Estimated repair time: {repairTime.minDays}–{repairTime.maxDays} days
+            </p>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Preliminary — a shop confirms final timeline.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="field-group">
@@ -206,9 +236,12 @@ export default function PostSubmissionNextSteps({
                 <select
                   className="field__input"
                   value={String(rentalDays)}
-                  onChange={(event) => setRentalDays(Number(event.target.value))}
+                  onChange={(event) => {
+                    setRentalDaysTouched(true)
+                    setRentalDays(Number(event.target.value))
+                  }}
                 >
-                  {[3, 5, 7].map((days) => (
+                  {[3, 5, 7, 10, 14].map((days) => (
                     <option key={days} value={days}>
                       {days}
                     </option>

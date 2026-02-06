@@ -1,3 +1,5 @@
+import { estimateRepairTime } from './repairTimeEstimator'
+
 export type Severity = 'Low' | 'Medium' | 'High'
 export type RecommendedNextStep = 'Approve' | 'Review' | 'Escalate'
 
@@ -6,6 +8,10 @@ export interface AIAssessment {
   severity: Severity
   confidence: number
   recommendedNextStep: RecommendedNextStep
+  estimatedRepairDaysMin: number
+  estimatedRepairDaysMax: number
+  repairTimeConfidence: number
+  repairTimeRationale: string[]
 }
 
 export interface PlateExtraction {
@@ -238,6 +244,11 @@ export const assessDamage = (file: File): Promise<AIAssessment> => {
     recommendedNextStep = 'Review'
   }
 
+  const repairTime = estimateRepairTime({
+    severity,
+    damageType: damageTypes,
+  })
+
   return new Promise((resolve) => {
     setTimeout(() => {
       resolve({
@@ -245,6 +256,10 @@ export const assessDamage = (file: File): Promise<AIAssessment> => {
         severity,
         confidence,
         recommendedNextStep,
+        estimatedRepairDaysMin: repairTime.minDays,
+        estimatedRepairDaysMax: repairTime.maxDays,
+        repairTimeConfidence: repairTime.confidence,
+        repairTimeRationale: repairTime.rationale,
       })
     }, 500)
   })

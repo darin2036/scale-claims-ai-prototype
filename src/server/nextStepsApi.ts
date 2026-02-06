@@ -57,6 +57,9 @@ export async function submitClaim(payload: {
   incidentDescription?: string
   incidentNarrationText?: string
   incidentNarrationAccepted?: boolean
+  estimatedRepairDaysMin?: number
+  estimatedRepairDaysMax?: number
+  repairTimeConfidence?: number
   estimate?: {
     estimatedRepairCost: number
     aboveDeductible: boolean

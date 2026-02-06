@@ -335,7 +335,8 @@
   padding: 16px;
   background: rgba(15, 23, 42, 0.55);
   display: grid;
-  place-items: center;
+  place-items: start center;
+  overflow-y: auto;
   z-index: 50;
 }
 
@@ -348,6 +349,9 @@
   padding: 16px;
   display: grid;
   gap: 14px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .dialog__header {

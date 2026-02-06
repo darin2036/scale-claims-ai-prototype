@@ -20,6 +20,7 @@ import { generateRepairEstimate } from './lib/estimation'
 import { type CopilotContext } from './lib/aiCopilot'
 import { generateIncidentNarration, type NarratorFacts } from './lib/incidentNarrator'
 import { mockLookupLocation } from './lib/mockLocation'
+import { estimateRepairTime } from './lib/repairTimeEstimator'
 import {
   getPolicyHolderByScenario,
   listDemoScenarios,
@@ -124,6 +125,9 @@ export default function App() {
     incidentDescription?: string
     incidentNarrationText?: string
     incidentNarrationAccepted?: boolean
+    estimatedRepairDaysMin?: number
+    estimatedRepairDaysMax?: number
+    repairTimeConfidence?: number
     estimate?: {
       estimatedRepairCost: number
       aboveDeductible: boolean
@@ -464,7 +468,45 @@ export default function App() {
     setIsAssessing(true)
     const results = await Promise.all(photos.damagePhoto.map((file) => assessDamage(file)))
     if (results.length === 1) {
-      setAssessment(results[0])
+      const base = results[0]
+      const vehicleBodyType = vehicleResult?.bodyType
+      const initialRepairTime = estimateRepairTime({
+        severity: base.severity,
+        damageType: base.damageTypes,
+        vehicleBodyType,
+      })
+
+      const baseWithRepairTime: AIAssessment = {
+        ...base,
+        estimatedRepairDaysMin: initialRepairTime.minDays,
+        estimatedRepairDaysMax: initialRepairTime.maxDays,
+        repairTimeConfidence: initialRepairTime.confidence,
+        repairTimeRationale: initialRepairTime.rationale,
+      }
+
+      const isPotentialTotalLoss =
+        vehicleResult && policyHolder
+          ? generateRepairEstimate({
+              vehicle: vehicleResult,
+              assessment: baseWithRepairTime,
+              policy: policyHolder.policy,
+            }).isPotentialTotalLoss
+          : undefined
+
+      const finalRepairTime = estimateRepairTime({
+        severity: base.severity,
+        damageType: base.damageTypes,
+        vehicleBodyType,
+        isPotentialTotalLoss,
+      })
+
+      setAssessment({
+        ...base,
+        estimatedRepairDaysMin: finalRepairTime.minDays,
+        estimatedRepairDaysMax: finalRepairTime.maxDays,
+        repairTimeConfidence: finalRepairTime.confidence,
+        repairTimeRationale: finalRepairTime.rationale,
+      })
       setIsAssessing(false)
       return
     }
@@ -487,11 +529,45 @@ export default function App() {
     } else if (combinedSeverity === 'Medium' || avgConfidence < 85) {
       recommendedNextStep = 'Review'
     }
-    setAssessment({
+    const vehicleBodyType = vehicleResult?.bodyType
+    const initialRepairTime = estimateRepairTime({
+      severity: combinedSeverity,
+      damageType: combinedDamageTypes,
+      vehicleBodyType,
+    })
+    const combinedWithRepairTime: AIAssessment = {
       damageTypes: combinedDamageTypes,
       severity: combinedSeverity,
       confidence: avgConfidence,
       recommendedNextStep,
+      estimatedRepairDaysMin: initialRepairTime.minDays,
+      estimatedRepairDaysMax: initialRepairTime.maxDays,
+      repairTimeConfidence: initialRepairTime.confidence,
+      repairTimeRationale: initialRepairTime.rationale,
+    }
+
+    const isPotentialTotalLoss =
+      vehicleResult && policyHolder
+        ? generateRepairEstimate({
+            vehicle: vehicleResult,
+            assessment: combinedWithRepairTime,
+            policy: policyHolder.policy,
+          }).isPotentialTotalLoss
+        : undefined
+
+    const finalRepairTime = estimateRepairTime({
+      severity: combinedSeverity,
+      damageType: combinedDamageTypes,
+      vehicleBodyType,
+      isPotentialTotalLoss,
+    })
+
+    setAssessment({
+      ...combinedWithRepairTime,
+      estimatedRepairDaysMin: finalRepairTime.minDays,
+      estimatedRepairDaysMax: finalRepairTime.maxDays,
+      repairTimeConfidence: finalRepairTime.confidence,
+      repairTimeRationale: finalRepairTime.rationale,
     })
     setIsAssessing(false)
   }
@@ -651,6 +727,9 @@ export default function App() {
           vehicle: Boolean(photos.vehiclePhoto),
           otherInsurance: false,
         },
+        estimatedRepairDaysMin: assessment?.estimatedRepairDaysMin,
+        estimatedRepairDaysMax: assessment?.estimatedRepairDaysMax,
+        repairTimeConfidence: assessment?.repairTimeConfidence,
         estimate: estimateSummary
           ? {
               estimatedRepairCost: estimateSummary.estimatedRepairCost,
@@ -1543,6 +1622,22 @@ export default function App() {
                     drivable={drivable !== false}
                     vehicle={vehicleResult!}
                     policy={policyHolder?.policy ?? null}
+                    repairTime={
+                      claimRecord.estimatedRepairDaysMin !== undefined &&
+                      claimRecord.estimatedRepairDaysMax !== undefined
+                        ? {
+                            minDays: claimRecord.estimatedRepairDaysMin,
+                            maxDays: claimRecord.estimatedRepairDaysMax,
+                            confidence: claimRecord.repairTimeConfidence ?? 0.65,
+                          }
+                        : assessment
+                          ? {
+                              minDays: assessment.estimatedRepairDaysMin,
+                              maxDays: assessment.estimatedRepairDaysMax,
+                              confidence: assessment.repairTimeConfidence,
+                            }
+                          : null
+                    }
                     tow={tow}
                     towDestination={towDestination}
                     towCustomAddress={towCustomAddress}
@@ -2209,6 +2304,28 @@ export default function App() {
                     rentalCoverage={policyHolder.policy.rentalCoverage}
                     estimatedRepairCost={estimateSummary?.estimatedRepairCost}
                   />
+                )}
+
+                {assessment && (
+                  <div className="summary summary--compact">
+                    <div>
+                      <span className="summary__label">Estimated repair time</span>
+                      <span className="summary__value">
+                        {assessment.estimatedRepairDaysMin}–{assessment.estimatedRepairDaysMax} days
+                      </span>
+                    </div>
+                    <div>
+                      <span className="summary__label">Repair time confidence</span>
+                      <span className="summary__value">
+                        {Math.round(assessment.repairTimeConfidence * 100)}%
+                      </span>
+                    </div>
+                    <div className="summary__full">
+                      <p className="muted" style={{ margin: 0 }}>
+                        Preliminary — a shop confirms final timeline.
+                      </p>
+                    </div>
+                  </div>
                 )}
 
                 {hasOtherParty === true && (
