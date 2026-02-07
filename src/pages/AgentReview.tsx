@@ -1,67 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import fenderbenderLogo from '../assets/fenderbender-logo.png'
-import { assessDamage, type RecommendedNextStep, type Severity } from '../lib/mockAI'
+import type { Severity } from '../lib/mockAI'
+import { AI_CASE_PIPELINE_STEPS, generateAICaseFileBundle } from '../agent/aiCaseFile'
 import {
   appendClaimEvent,
-  type AgentClaimStatus,
   loadAgentClaims,
   resetAgentClaimsForDemo,
   updateClaim,
+  type AgentAICaseFile,
+  type AgentCaseDecision,
+  type AgentCaseNextStep,
   type AgentClaim,
-  type AgentDecision,
-  type AgentEstimateCategory,
-  type AgentEstimateLineItem,
+  type AgentClaimStatus,
 } from '../agent/store'
-import { findComparableClaims, type ComparableClaimMatch } from '../agent/comparableClaims'
 import './AgentReview.css'
-
-const COST_BANDS: Record<Severity, { min: number; max: number }> = {
-  Low: { min: 500, max: 1500 },
-  Medium: { min: 1500, max: 4000 },
-  High: { min: 4000, max: 9000 },
-}
-
-const formatSubmittedAt = (value: string) => {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return value
-  }
-  return parsed.toLocaleString()
-}
-
-const formatDurationMs = (durationMs: number) => {
-  if (!Number.isFinite(durationMs) || durationMs < 0) {
-    return '—'
-  }
-  const minutes = Math.round(durationMs / 60000)
-  if (minutes < 60) {
-    return `${minutes} min`
-  }
-  const hours = Math.floor(minutes / 60)
-  const remaining = minutes % 60
-  if (hours < 24) {
-    return `${hours}h ${remaining}m`
-  }
-  const days = Math.floor(hours / 24)
-  const hoursLeft = hours % 24
-  return `${days}d ${hoursLeft}h`
-}
-
-const formatDuration = (start?: string, end?: string) => {
-  if (!start || !end) {
-    return '—'
-  }
-  const startMs = new Date(start).getTime()
-  const endMs = new Date(end).getTime()
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
-    return '—'
-  }
-  return formatDurationMs(endMs - startMs)
-}
-
-const statusClassName = (status: AgentClaimStatus) =>
-  `agent-status agent-status--${status.toLowerCase().replace(/\s+/g, '-')}`
 
 const CURRENT_AGENT_NAME = 'Alex Rivera'
 const REQUESTED_SHOT_CHECKLIST = [
@@ -69,94 +22,232 @@ const REQUESTED_SHOT_CHECKLIST = [
   'Wide shot of the full vehicle',
   'Opposite-side angle for context',
   'Photo in brighter lighting',
-  'Photo including nearby reference point (curb/line)',
 ]
-const ESTIMATE_CATEGORIES: AgentEstimateCategory[] = ['Parts', 'Labor', 'Paint', 'Misc']
-const toNormalizedConfidence = (confidence: number) => (confidence <= 1 ? confidence : confidence / 100)
-const createEmptyLineItem = (): AgentEstimateLineItem => ({
-  id: `${Date.now()}-${Math.round(Math.random() * 10_000)}`,
-  description: '',
-  category: 'Misc',
-  amount: 0,
-})
-const sanitizeAmount = (value: string): number => {
+
+const STATUS_FILTERS: Array<'All' | AgentClaimStatus> = [
+  'All',
+  'New',
+  'In Review',
+  'Needs More Photos',
+  'Pending Approval',
+  'Authorized',
+]
+
+const DECISION_OPTIONS: Array<{ value: AgentCaseDecision; label: string }> = [
+  { value: 'Authorize', label: 'Authorize Repairs (simulated)' },
+  { value: 'Needs More Photos', label: 'Request More Photos' },
+  { value: 'Escalate', label: 'Escalate to Senior Adjuster (simulated)' },
+]
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const formatDateTime = (value?: string) => {
+  if (!value) {
+    return '—'
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+  return parsed.toLocaleString()
+}
+
+const formatCurrency = (amount: number) => `$${Math.round(amount).toLocaleString()}`
+
+const formatConfidence = (value: number) => `${Math.round((value <= 1 ? value : value / 100) * 100)}%`
+
+const parseNonNegativeInteger = (value: string): number | null => {
+  if (!value.trim()) {
+    return null
+  }
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
-    return 0
+    return null
   }
   return Math.max(0, Math.round(parsed))
 }
 
+const formatDurationMs = (durationMs: number) => {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return '—'
+  }
+  const minutes = Math.round(durationMs / 60000)
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+  const hours = Math.floor(minutes / 60)
+  const remainder = minutes % 60
+  if (hours < 24) {
+    return `${hours}h ${remainder}m`
+  }
+  const days = Math.floor(hours / 24)
+  const hoursRemainder = hours % 24
+  return `${days}d ${hoursRemainder}h`
+}
+
+const hasLowConfidenceCaseFile = (caseFile: AgentAICaseFile) =>
+  [
+    caseFile.severity.confidence,
+    caseFile.nextStep.confidence,
+    caseFile.estimate.confidence,
+    caseFile.duration.confidence,
+    caseFile.finalRecommendation.confidence,
+  ].some((confidence) => confidence < 0.6)
+
+const statusClassName = (status: AgentClaimStatus) =>
+  `agent-status agent-status--${status.toLowerCase().replace(/\s+/g, '-')}`
+
+const decisionToStatus = (decision: AgentCaseDecision): AgentClaimStatus => {
+  if (decision === 'Authorize') {
+    return 'Authorized'
+  }
+  if (decision === 'Escalate') {
+    return 'Pending Approval'
+  }
+  return 'Needs More Photos'
+}
+
+const humanDecisionLabel = (decision: AgentCaseDecision) =>
+  DECISION_OPTIONS.find((option) => option.value === decision)?.label ?? decision
+
 export default function AgentReview() {
   const [claims, setClaims] = useState<AgentClaim[]>(() => loadAgentClaims())
-  const [assessingClaimId, setAssessingClaimId] = useState<string | null>(null)
-  const [banner, setBanner] = useState<{ tone: 'info' | 'success'; message: string } | null>(null)
+  const [selectedClaimId, setSelectedClaimId] = useState<string>(() => loadAgentClaims()[0]?.id ?? '')
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'All' | AgentClaimStatus>('All')
-  const [sourceFilter, setSourceFilter] = useState<'All' | 'customer_flow' | 'mock'>('All')
-  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'status'>('newest')
+  const [sortOrder, setSortOrder] = useState<'updated_desc' | 'updated_asc'>('updated_desc')
 
-  const [selectedClaimId, setSelectedClaimId] = useState<string>(() => loadAgentClaims()[0]?.id ?? '')
+  const [pipeline, setPipeline] = useState<{ claimId: string; stepIndex: number } | null>(null)
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null)
-  const [agentFinalSeverity, setAgentFinalSeverity] = useState<Severity | ''>('')
-  const [agentFinalNextStep, setAgentFinalNextStep] = useState<RecommendedNextStep | ''>('')
-  const [lineItems, setLineItems] = useState<AgentEstimateLineItem[]>([])
-  const [estimatedRepairCost, setEstimatedRepairCost] = useState('')
-  const [finalEstimateManuallyEdited, setFinalEstimateManuallyEdited] = useState(false)
-  const [agentNotes, setAgentNotes] = useState('')
-  const [seniorAdjusterReviewed, setSeniorAdjusterReviewed] = useState(false)
-  const [seniorAdjusterNote, setSeniorAdjusterNote] = useState('')
-  const [comparableRefreshTick, setComparableRefreshTick] = useState(0)
-  const [overrideReasons, setOverrideReasons] = useState<{
+  const [reviewedConfirmation, setReviewedConfirmation] = useState(false)
+  const [selectedDecision, setSelectedDecision] = useState<AgentCaseDecision>('Needs More Photos')
+
+  const [reviewSeverity, setReviewSeverity] = useState<Severity | ''>('')
+  const [reviewNextStep, setReviewNextStep] = useState<AgentCaseNextStep | ''>('')
+  const [reviewEstimateTotal, setReviewEstimateTotal] = useState('')
+  const [reviewDurationMin, setReviewDurationMin] = useState('')
+  const [reviewDurationMax, setReviewDurationMax] = useState('')
+  const [reviewNotes, setReviewNotes] = useState('')
+  const [reasonForChange, setReasonForChange] = useState<{
     severity?: string
-    recommendedNextStep?: string
-    estimatedRepairCost?: string
-    finalEstimateVsTotal?: string
+    nextStep?: string
+    estimate?: string
+    duration?: string
+    notes?: string
   }>({})
 
+  const [banner, setBanner] = useState<{ tone: 'info' | 'success' | 'warn'; message: string } | null>(null)
+
+  const refreshClaims = () => {
+    setClaims(loadAgentClaims())
+  }
+
   const queueClaims = useMemo(() => {
+    const search = searchQuery.trim().toLowerCase()
     const filtered = claims.filter((claim) => {
-      const haystack = `${claim.id} ${claim.vehicle.year} ${claim.vehicle.make} ${claim.vehicle.model} ${
-        claim.policy?.policyId ?? ''
-      } ${claim.policy?.insuredName ?? ''}`.toLowerCase()
-      const searchText = searchQuery.trim().toLowerCase()
-      if (searchText && !haystack.includes(searchText)) {
-        return false
-      }
       if (statusFilter !== 'All' && claim.status !== statusFilter) {
         return false
       }
-      if (sourceFilter !== 'All' && claim.source !== sourceFilter) {
-        return false
+      if (!search) {
+        return true
       }
-      return true
+      const haystack = [
+        claim.id,
+        claim.vehicle.make,
+        claim.vehicle.model,
+        claim.vehicle.year,
+        claim.policy?.policyId ?? '',
+        claim.policy?.insuredName ?? '',
+        claim.assignee ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(search)
     })
 
-    const statusRank: Record<AgentClaimStatus, number> = {
-      New: 0,
-      'In Review': 1,
-      'Needs More Photos': 2,
-      'Pending Approval': 3,
-      Authorized: 4,
+    return [...filtered].sort((left, right) => {
+      const leftMs = new Date(left.lastUpdatedAt).getTime()
+      const rightMs = new Date(right.lastUpdatedAt).getTime()
+      return sortOrder === 'updated_asc' ? leftMs - rightMs : rightMs - leftMs
+    })
+  }, [claims, searchQuery, sortOrder, statusFilter])
+
+  useEffect(() => {
+    if (queueClaims.length === 0) {
+      setSelectedClaimId('')
+      return
+    }
+    if (!queueClaims.some((claim) => claim.id === selectedClaimId)) {
+      setSelectedClaimId(queueClaims[0].id)
+    }
+  }, [queueClaims, selectedClaimId])
+
+  const selectedClaim = claims.find((claim) => claim.id === selectedClaimId) ?? null
+  const selectedCaseFile = selectedClaim?.aiCaseFile ?? null
+  const selectedPhoto =
+    selectedClaim?.photos.find((photo) => photo.id === activePhotoId) ?? selectedClaim?.photos[0] ?? null
+
+  useEffect(() => {
+    if (!selectedClaim) {
+      setActivePhotoId(null)
+      return
+    }
+    if (!selectedPhoto) {
+      setActivePhotoId(null)
+      return
+    }
+    if (!activePhotoId || !selectedClaim.photos.some((photo) => photo.id === activePhotoId)) {
+      setActivePhotoId(selectedPhoto.id)
+    }
+  }, [selectedClaim?.id, selectedClaim?.photos.length, selectedPhoto?.id, activePhotoId])
+
+  useEffect(() => {
+    if (!selectedClaim || selectedClaim.readOnlyImported || selectedClaim.openedAt) {
+      return
+    }
+    updateClaim(selectedClaim.id, { openedAt: new Date().toISOString() })
+    refreshClaims()
+  }, [selectedClaim?.id])
+
+  const resetReviewStateFromClaim = (claim: AgentClaim | null) => {
+    if (!claim || !claim.aiCaseFile) {
+      setReviewSeverity('')
+      setReviewNextStep('')
+      setReviewEstimateTotal('')
+      setReviewDurationMin('')
+      setReviewDurationMax('')
+      setReviewNotes(claim?.agentNotes ?? '')
+      setReasonForChange({})
+      setReviewedConfirmation(false)
+      setSelectedDecision('Needs More Photos')
+      return
     }
 
-    return [...filtered].sort((a, b) => {
-      const timeA = new Date(a.lastUpdatedAt).getTime()
-      const timeB = new Date(b.lastUpdatedAt).getTime()
+    const decision = claim.agentDecision
+    const caseFile = claim.aiCaseFile
+    const lowConfidence = hasLowConfidenceCaseFile(caseFile)
+    const defaultDecision = lowConfidence ? 'Needs More Photos' : caseFile.finalRecommendation.decision
 
-      if (sortOrder === 'oldest') {
-        return timeA - timeB
-      }
-      if (sortOrder === 'status') {
-        const byStatus = statusRank[a.status] - statusRank[b.status]
-        if (byStatus !== 0) {
-          return byStatus
-        }
-        return timeB - timeA
-      }
-      return timeB - timeA
+    setReviewSeverity((decision?.severity ?? caseFile.severity.value) as Severity)
+    setReviewNextStep((decision?.caseFileNextStep ?? caseFile.nextStep.value) as AgentCaseNextStep)
+    setReviewEstimateTotal(String(decision?.estimatedRepairCost ?? caseFile.estimate.total))
+    setReviewDurationMin(String(decision?.predictedDurationDaysMin ?? caseFile.duration.minDays))
+    setReviewDurationMax(String(decision?.predictedDurationDaysMax ?? caseFile.duration.maxDays))
+    setReviewNotes(claim.agentNotes ?? '')
+    setReasonForChange({
+      severity: decision?.overrideReasons?.severity,
+      nextStep: decision?.overrideReasons?.nextStep,
+      estimate: decision?.overrideReasons?.estimatedRepairCost,
+      duration: decision?.overrideReasons?.durationRange,
+      notes: decision?.overrideReasons?.notes,
     })
-  }, [claims, searchQuery, sortOrder, sourceFilter, statusFilter])
+    setReviewedConfirmation(false)
+    setSelectedDecision(decision?.decisionChoice ?? defaultDecision)
+  }
+
+  useEffect(() => {
+    resetReviewStateFromClaim(selectedClaim)
+  }, [selectedClaimId, selectedClaim?.lastUpdatedAt])
 
   const metrics = useMemo(() => {
     const counts: Record<AgentClaimStatus, number> = {
@@ -166,922 +257,493 @@ export default function AgentReview() {
       'Pending Approval': 0,
       Authorized: 0,
     }
-    let overrideCount = 0
+
+    let overrides = 0
     let lowConfidenceCount = 0
-    let authorizedWithTiming = 0
+    let lowConfidenceBase = 0
     let totalAuthorizeMs = 0
+    let authorizeCount = 0
 
     claims.forEach((claim) => {
       counts[claim.status] += 1
-      if (claim.agentDecision?.overrideReasons && Object.keys(claim.agentDecision.overrideReasons).length > 0) {
-        overrideCount += 1
+
+      const reasonCount = claim.agentDecision?.overrideReasons
+        ? Object.values(claim.agentDecision.overrideReasons).filter((value) => Boolean(value?.trim())).length
+        : 0
+      if (reasonCount > 0) {
+        overrides += 1
       }
-      const confidence = claim.aiAssessment?.confidence
-      if (typeof confidence === 'number') {
-        const normalized = toNormalizedConfidence(confidence)
-        if (normalized < 0.6) {
+
+      if (claim.aiCaseFile) {
+        lowConfidenceBase += 1
+        if (hasLowConfidenceCaseFile(claim.aiCaseFile)) {
           lowConfidenceCount += 1
         }
       }
-      if (claim.authorizedAt && claim.openedAt) {
+
+      if (claim.openedAt && claim.authorizedAt) {
         const openMs = new Date(claim.openedAt).getTime()
         const authMs = new Date(claim.authorizedAt).getTime()
-        if (Number.isFinite(openMs) && Number.isFinite(authMs) && authMs >= openMs) {
+        if (Number.isFinite(openMs) && Number.isFinite(authMs) && authMs > openMs) {
           totalAuthorizeMs += authMs - openMs
-          authorizedWithTiming += 1
+          authorizeCount += 1
         }
       }
     })
-
-    const totalClaims = claims.length
-    const totalAssessed = claims.filter((claim) => claim.aiAssessment).length
-    const overridePercent = totalClaims > 0 ? Math.round((overrideCount / totalClaims) * 100) : 0
-    const lowConfidencePercent = totalAssessed > 0 ? Math.round((lowConfidenceCount / totalAssessed) * 100) : 0
-    const avgAuthorizeMs = authorizedWithTiming > 0 ? totalAuthorizeMs / authorizedWithTiming : null
 
     return {
       counts,
-      overridePercent,
-      lowConfidencePercent,
-      avgAuthorizeMs,
+      overridePercent: claims.length > 0 ? Math.round((overrides / claims.length) * 100) : 0,
+      lowConfidencePercent: lowConfidenceBase > 0 ? Math.round((lowConfidenceCount / lowConfidenceBase) * 100) : 0,
+      avgAuthorizeTime: authorizeCount > 0 ? formatDurationMs(totalAuthorizeMs / authorizeCount) : '—',
     }
   }, [claims])
 
-  useEffect(() => {
-    if (!queueClaims.some((claim) => claim.id === selectedClaimId) && queueClaims[0]) {
-      setSelectedClaimId(queueClaims[0].id)
-    }
-  }, [queueClaims, selectedClaimId])
+  const parsedEstimateTotal = parseNonNegativeInteger(reviewEstimateTotal)
+  const parsedDurationMin = parseNonNegativeInteger(reviewDurationMin)
+  const parsedDurationMax = parseNonNegativeInteger(reviewDurationMax)
+  const durationIsValid =
+    parsedDurationMin !== null &&
+    parsedDurationMax !== null &&
+    Number.isFinite(parsedDurationMin) &&
+    Number.isFinite(parsedDurationMax) &&
+    parsedDurationMax >= parsedDurationMin
 
-  const selectedClaim = claims.find((claim) => claim.id === selectedClaimId) ?? null
+  const changes = useMemo(() => {
+    if (!selectedCaseFile) {
+      return [] as Array<{ field: 'severity' | 'nextStep' | 'estimate' | 'duration' | 'notes'; reason: string }>
+    }
 
-  useEffect(() => {
-    if (!selectedClaim) {
-      setActivePhotoId(null)
-      return
-    }
-    if (selectedClaim.photos.length === 0) {
-      setActivePhotoId(null)
-      return
-    }
-    if (!selectedClaim.photos.some((photo) => photo.id === activePhotoId)) {
-      setActivePhotoId(selectedClaim.photos[0].id)
-    }
-  }, [activePhotoId, selectedClaim])
+    const next: Array<{ field: 'severity' | 'nextStep' | 'estimate' | 'duration' | 'notes'; reason: string }> = []
 
-  useEffect(() => {
-    if (!selectedClaim) {
-      return
+    if (reviewSeverity && reviewSeverity !== selectedCaseFile.severity.value) {
+      next.push({ field: 'severity', reason: reasonForChange.severity?.trim() ?? '' })
     }
-    const aiSuggestedSeverity = selectedClaim.aiAssessment?.severity
-    const aiSuggestedNextStep = selectedClaim.aiAssessment?.recommendedNextStep
-    const aiSuggestedCostBand = aiSuggestedSeverity ? COST_BANDS[aiSuggestedSeverity] : null
-    const aiSuggestedCost =
-      aiSuggestedCostBand ? Math.round((aiSuggestedCostBand.min + aiSuggestedCostBand.max) / 2) : null
-    const decision = selectedClaim.agentDecision
-    const nextLineItems =
-      decision?.lineItems && decision.lineItems.length > 0
-        ? decision.lineItems
-        : aiSuggestedCost !== null
-          ? [
-              {
-                id: 'seed-ai-estimate',
-                description: 'Initial AI estimate',
-                category: 'Labor' as AgentEstimateCategory,
-                amount: aiSuggestedCost,
-              },
-            ]
-          : [createEmptyLineItem()]
-    const nextLineItemsTotal = nextLineItems.reduce((sum, item) => sum + (item.amount || 0), 0)
-    setAgentFinalSeverity((decision?.severity ?? aiSuggestedSeverity ?? '') as Severity | '')
-    setAgentFinalNextStep((decision?.recommendedNextStep ?? aiSuggestedNextStep ?? '') as RecommendedNextStep | '')
-    setLineItems(nextLineItems)
-    setEstimatedRepairCost(
-      typeof decision?.estimatedRepairCost === 'number'
-        ? String(decision.estimatedRepairCost)
-        : String(nextLineItemsTotal),
-    )
-    setFinalEstimateManuallyEdited(
-      typeof decision?.estimatedRepairCost === 'number' && decision.estimatedRepairCost !== nextLineItemsTotal,
-    )
-    setOverrideReasons(decision?.overrideReasons ?? {})
-    setAgentNotes(selectedClaim.agentNotes ?? '')
-    setSeniorAdjusterReviewed(Boolean(selectedClaim.seniorApproval?.reviewed))
-    setSeniorAdjusterNote(selectedClaim.seniorApproval?.note ?? '')
-    setBanner(null)
-  }, [selectedClaimId])
+    if (reviewNextStep && reviewNextStep !== selectedCaseFile.nextStep.value) {
+      next.push({ field: 'nextStep', reason: reasonForChange.nextStep?.trim() ?? '' })
+    }
+    if (parsedEstimateTotal !== null && parsedEstimateTotal !== selectedCaseFile.estimate.total) {
+      next.push({ field: 'estimate', reason: reasonForChange.estimate?.trim() ?? '' })
+    }
+    if (
+      durationIsValid &&
+      (parsedDurationMin !== selectedCaseFile.duration.minDays || parsedDurationMax !== selectedCaseFile.duration.maxDays)
+    ) {
+      next.push({ field: 'duration', reason: reasonForChange.duration?.trim() ?? '' })
+    }
+    if (reviewNotes.trim()) {
+      next.push({ field: 'notes', reason: reasonForChange.notes?.trim() ?? '' })
+    }
 
-  const selectedPhoto =
-    selectedClaim?.photos.find((photo) => photo.id === activePhotoId) ?? selectedClaim?.photos[0] ?? null
-  const aiAssessment = selectedClaim?.aiAssessment
-  const comparableSeverity = (agentFinalSeverity || aiAssessment?.severity || null) as Severity | null
-  const aiConfidenceNormalized = aiAssessment ? toNormalizedConfidence(aiAssessment.confidence) : null
-  const isLowConfidence = aiConfidenceNormalized !== null && aiConfidenceNormalized < 0.6
-  const aiCostBand = aiAssessment ? COST_BANDS[aiAssessment.severity] : null
-  const aiSuggestedEstimate = aiCostBand ? Math.round((aiCostBand.min + aiCostBand.max) / 2) : null
-  const comparableClaims = useMemo<ComparableClaimMatch[]>(() => {
-    if (!selectedClaim || !aiAssessment || !comparableSeverity) {
-      return []
-    }
-    return findComparableClaims(
-      {
-        vehicleMake: selectedClaim.vehicle.make,
-        vehicleModel: selectedClaim.vehicle.model,
-        severity: comparableSeverity,
-        damageAreas: aiAssessment.damageTypes,
-      },
-      5,
-    )
+    return next
   }, [
-    aiAssessment?.damageTypes.join('|'),
-    aiAssessment?.severity,
-    comparableRefreshTick,
-    comparableSeverity,
-    selectedClaim?.id,
-    selectedClaim?.vehicle.make,
-    selectedClaim?.vehicle.model,
+    selectedCaseFile,
+    reviewSeverity,
+    reviewNextStep,
+    parsedEstimateTotal,
+    parsedDurationMin,
+    parsedDurationMax,
+    durationIsValid,
+    reviewNotes,
+    reasonForChange,
   ])
-  const comparableCostRange =
-    comparableClaims.length > 0
-      ? {
-          min: Math.min(...comparableClaims.map((claim) => claim.finalRepairCost)),
-          max: Math.max(...comparableClaims.map((claim) => claim.finalRepairCost)),
-        }
-      : null
-  const lineItemsTotal = lineItems.reduce((sum, item) => sum + (item.amount || 0), 0)
-  const normalizedEstimate = (() => {
-    if (!estimatedRepairCost.trim()) {
-      return null
-    }
-    const parsed = Number(estimatedRepairCost)
-    if (!Number.isFinite(parsed)) {
-      return null
-    }
-    return Math.max(0, Math.round(parsed))
-  })()
-  const severityOverridden = Boolean(aiAssessment && agentFinalSeverity && agentFinalSeverity !== aiAssessment.severity)
-  const nextStepOverridden = Boolean(
-    aiAssessment && agentFinalNextStep && agentFinalNextStep !== aiAssessment.recommendedNextStep,
-  )
-  const estimateOverridden = Boolean(
-    aiSuggestedEstimate !== null && normalizedEstimate !== null && normalizedEstimate !== aiSuggestedEstimate,
-  )
-  const finalEstimateDiffRatio =
-    normalizedEstimate !== null && lineItemsTotal > 0
-      ? Math.abs(normalizedEstimate - lineItemsTotal) / lineItemsTotal
-      : 0
-  const finalEstimateDiffOverThreshold = Boolean(
-    normalizedEstimate !== null && lineItemsTotal > 0 && finalEstimateDiffRatio > 0.1,
-  )
-  const overrideSummary: Array<{ field: string; reason: string }> = [
-    severityOverridden
-      ? {
-          field: 'Severity',
-          reason: overrideReasons.severity?.trim() || 'Reason required',
-        }
-      : null,
-    nextStepOverridden
-      ? {
-          field: 'Recommended Next Step',
-          reason: overrideReasons.recommendedNextStep?.trim() || 'Reason required',
-        }
-      : null,
-    estimateOverridden
-      ? {
-          field: 'Estimate',
-          reason: overrideReasons.estimatedRepairCost?.trim() || 'Reason required',
-        }
-      : null,
-    finalEstimateDiffOverThreshold
-      ? {
-          field: 'Final Estimate vs Line-Item Total',
-          reason: overrideReasons.finalEstimateVsTotal?.trim() || 'Reason required',
-        }
-      : null,
-  ].filter((item): item is { field: string; reason: string } => item !== null)
-  const isImportedReadOnly = Boolean(selectedClaim?.readOnlyImported)
-  const isPendingApproval = selectedClaim?.status === 'Pending Approval'
-  const isAuthorized = selectedClaim?.status === 'Authorized'
-  const isEditLocked = Boolean(isImportedReadOnly || isPendingApproval || isAuthorized)
-  const isSeniorPanelLocked = Boolean(isImportedReadOnly || isAuthorized)
-  const photoRequest = selectedClaim?.photoRequest
 
-  useEffect(() => {
-    if (!finalEstimateManuallyEdited) {
-      setEstimatedRepairCost(String(lineItemsTotal))
-    }
-  }, [finalEstimateManuallyEdited, lineItemsTotal])
+  const hasMissingChangeReason = changes.some((change) => !change.reason)
 
-  const refreshClaims = () => {
-    setClaims(loadAgentClaims())
-  }
+  const isReadOnly = Boolean(selectedClaim?.readOnlyImported || selectedClaim?.status === 'Authorized')
+  const lowConfidence = selectedCaseFile ? hasLowConfidenceCaseFile(selectedCaseFile) : false
+  const defaultDecision: AgentCaseDecision = selectedCaseFile
+    ? lowConfidence
+      ? 'Needs More Photos'
+      : selectedCaseFile.finalRecommendation.decision
+    : 'Needs More Photos'
 
-  useEffect(() => {
-    if (!selectedClaim) {
+  const assignSelectedClaimToMe = () => {
+    if (!selectedClaim || selectedClaim.readOnlyImported || selectedClaim.assignee === CURRENT_AGENT_NAME) {
       return
     }
-    if (selectedClaim.readOnlyImported || selectedClaim.openedAt) {
-      return
-    }
-    updateClaim(selectedClaim.id, { openedAt: new Date().toISOString() })
-    refreshClaims()
-  }, [selectedClaim?.id])
-
-  const getReadOnlyMessage = (claim: AgentClaim) => {
-    if (claim.readOnlyImported) {
-      return 'Imported customer claim is read-only in agent mode.'
-    }
-    if (claim.status === 'Pending Approval') {
-      return 'Claim is locked while pending senior adjuster review.'
-    }
-    if (claim.status === 'Authorized') {
-      return 'Authorized claims are read-only.'
-    }
-    return null
-  }
-
-  const guardEditableClaim = (claim: AgentClaim | null) => {
-    if (!claim) {
-      return null
-    }
-    const readOnlyMessage = getReadOnlyMessage(claim)
-    if (readOnlyMessage) {
-      setBanner({ tone: 'info', message: readOnlyMessage })
-      return null
-    }
-    return claim
-  }
-
-  const handleAddLineItem = () => {
-    if (!guardEditableClaim(selectedClaim)) {
-      return
-    }
-    setLineItems((current) => {
-      if (current.length >= 8) {
-        setBanner({ tone: 'info', message: 'You can add up to 8 line items.' })
-        return current
-      }
-      return [...current, createEmptyLineItem()]
-    })
-  }
-
-  const handleRemoveLineItem = (id: string) => {
-    if (!guardEditableClaim(selectedClaim)) {
-      return
-    }
-    setLineItems((current) => {
-      const next = current.filter((item) => item.id !== id)
-      if (next.length === 0) {
-        return [createEmptyLineItem()]
-      }
-      return next
-    })
-  }
-
-  const handleUpdateLineItem = (
-    id: string,
-    patch: Partial<Pick<AgentEstimateLineItem, 'description' | 'category' | 'amount'>>,
-  ) => {
-    if (!guardEditableClaim(selectedClaim)) {
-      return
-    }
-    setLineItems((current) =>
-      current.map((item) => {
-        if (item.id !== id) {
-          return item
-        }
-        return { ...item, ...patch }
-      }),
-    )
-  }
-
-  const hasMissingOverrideReason = () => {
-    if (severityOverridden && !overrideReasons.severity?.trim()) {
-      return true
-    }
-    if (nextStepOverridden && !overrideReasons.recommendedNextStep?.trim()) {
-      return true
-    }
-    if (estimateOverridden && !overrideReasons.estimatedRepairCost?.trim()) {
-      return true
-    }
-    if (finalEstimateDiffOverThreshold && !overrideReasons.finalEstimateVsTotal?.trim()) {
-      return true
-    }
-    return false
-  }
-
-  const buildAgentDecision = (): AgentDecision => {
-    const nextDecision: AgentDecision = {
-      severity: (agentFinalSeverity || aiAssessment?.severity) as Severity | undefined,
-      recommendedNextStep: (agentFinalNextStep || aiAssessment?.recommendedNextStep) as
-        | RecommendedNextStep
-        | undefined,
-      estimatedRepairCost: normalizedEstimate,
-      lineItems,
-    }
-
-    const nextOverrideReasons: NonNullable<AgentDecision['overrideReasons']> = {}
-    if (severityOverridden && overrideReasons.severity?.trim()) {
-      nextOverrideReasons.severity = overrideReasons.severity.trim()
-    }
-    if (nextStepOverridden && overrideReasons.recommendedNextStep?.trim()) {
-      nextOverrideReasons.recommendedNextStep = overrideReasons.recommendedNextStep.trim()
-    }
-    if (estimateOverridden && overrideReasons.estimatedRepairCost?.trim()) {
-      nextOverrideReasons.estimatedRepairCost = overrideReasons.estimatedRepairCost.trim()
-    }
-    if (finalEstimateDiffOverThreshold && overrideReasons.finalEstimateVsTotal?.trim()) {
-      nextOverrideReasons.finalEstimateVsTotal = overrideReasons.finalEstimateVsTotal.trim()
-    }
-
-    if (Object.keys(nextOverrideReasons).length > 0) {
-      nextDecision.overrideReasons = nextOverrideReasons
-    }
-    return nextDecision
-  }
-
-  const handleRunAssessment = async () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-
-    setAssessingClaimId(editableClaim.id)
-    try {
-      const seedPayload = [
-        editableClaim.id,
-        editableClaim.vehicle.make,
-        editableClaim.vehicle.model,
-        editableClaim.submittedAt,
-        editableClaim.photos[0]?.name ?? 'no-photo',
-      ].join('|')
-      const fakeImage = new File([seedPayload], `${editableClaim.id}.jpg`, {
-        type: 'image/jpeg',
-        lastModified: Date.now(),
-      })
-      const result = await assessDamage(fakeImage)
-      const normalizedConfidence = toNormalizedConfidence(result.confidence)
-      const lowConfidence = normalizedConfidence < 0.6
-
-      const nextStatus =
-        lowConfidence
-          ? 'Needs More Photos'
-          : editableClaim.status === 'New' || editableClaim.status === 'Needs More Photos'
-            ? 'In Review'
-            : editableClaim.status
-
-    updateClaim(editableClaim.id, {
-      aiAssessment: result,
-      status: nextStatus,
-      aiAssessedAt: new Date().toISOString(),
-      photoRequest: lowConfidence
-        ? {
-              requested: true,
-              requestedAt: new Date().toISOString(),
-              photosReceived: false,
-              checklist: REQUESTED_SHOT_CHECKLIST,
-            }
-          : editableClaim.photoRequest,
-      })
-      appendClaimEvent(editableClaim.id, {
-        type: 'ai_assessment',
-        message: `AI assessment run: ${result.severity} severity at ${result.confidence}% confidence. Status: ${nextStatus}.`,
-      })
-      if (lowConfidence) {
-        appendClaimEvent(editableClaim.id, {
-          type: 'guardrail_low_confidence',
-          message: 'Confidence below 0.6. Default recommendation set to Needs More Photos.',
-        })
-      }
-      refreshClaims()
-      setAgentFinalSeverity((current) => current || result.severity)
-      setAgentFinalNextStep((current) => current || result.recommendedNextStep)
-    } finally {
-      setAssessingClaimId(null)
-    }
-  }
-
-  const handleSaveDraft = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    if (hasMissingOverrideReason()) {
-      setBanner({ tone: 'info', message: 'Reason for override is required for all changed AI-suggested fields.' })
-      return
-    }
-
-    updateClaim(editableClaim.id, {
-      status:
-        editableClaim.status === 'New' || editableClaim.status === 'Needs More Photos'
-          ? 'In Review'
-          : editableClaim.status,
-      agentDecision: buildAgentDecision(),
-      agentNotes: agentNotes.trim(),
-      draftSavedAt: new Date().toISOString(),
-    })
-    appendClaimEvent(editableClaim.id, {
-      type: 'draft_saved',
-      message: 'Agent draft saved.',
+    updateClaim(selectedClaim.id, { assignee: CURRENT_AGENT_NAME })
+    appendClaimEvent(selectedClaim.id, {
+      type: 'assigned',
+      message: `Claim assigned to ${CURRENT_AGENT_NAME}.`,
     })
     refreshClaims()
-    setBanner({ tone: 'info', message: 'Draft saved.' })
   }
 
-  const handleApprove = () => {
+  const handleGenerateCaseFile = async () => {
     if (!selectedClaim) {
       return
     }
     if (selectedClaim.readOnlyImported) {
-      setBanner({ tone: 'info', message: 'Imported customer claim is read-only in agent mode.' })
+      setBanner({ tone: 'info', message: 'Imported customer snapshot is read-only in agent mode.' })
       return
     }
-    if (selectedClaim.status !== 'Pending Approval') {
-      setBanner({ tone: 'info', message: 'Claim must be Pending Approval before authorization.' })
-      return
+
+    setBanner(null)
+    setPipeline({ claimId: selectedClaim.id, stepIndex: 0 })
+
+    try {
+      for (let i = 0; i < AI_CASE_PIPELINE_STEPS.length; i += 1) {
+        setPipeline({ claimId: selectedClaim.id, stepIndex: i })
+        await sleep(180)
+      }
+
+      const bundle = await generateAICaseFileBundle(selectedClaim)
+      const lowConfidenceRecommendation = hasLowConfidenceCaseFile(bundle.caseFile)
+      const now = new Date().toISOString()
+
+      updateClaim(selectedClaim.id, {
+        status: selectedClaim.status === 'New' ? 'In Review' : selectedClaim.status,
+        aiCaseFile: bundle.caseFile,
+        aiAssessment: bundle.assessment,
+        aiDurationPrediction: bundle.durationPrediction,
+        aiSuggestedLineItems: bundle.suggestedLineItems,
+        aiSignals: bundle.signals,
+        aiSignalsEvaluatedAt: now,
+        aiAssessedAt: now,
+        agentDecision: {
+          ...(selectedClaim.agentDecision ?? {}),
+          severity: bundle.caseFile.severity.value,
+          caseFileNextStep: bundle.caseFile.nextStep.value,
+          estimatedRepairCost: bundle.caseFile.estimate.total,
+          predictedDurationDaysMin: bundle.caseFile.duration.minDays,
+          predictedDurationDaysMax: bundle.caseFile.duration.maxDays,
+          lineItems: bundle.caseFile.estimate.lineItems,
+          overrideReasons: {},
+        },
+      })
+
+      appendClaimEvent(selectedClaim.id, {
+        type: 'ai_case_file_generated',
+        message: `Generated AI case file. Recommendation: ${bundle.caseFile.finalRecommendation.decision}.`,
+      })
+      if (lowConfidenceRecommendation) {
+        appendClaimEvent(selectedClaim.id, {
+          type: 'low_confidence_guardrail',
+          message: 'Low confidence detected. Default decision set to Request More Photos.',
+        })
+      }
+
+      refreshClaims()
+      setSelectedDecision(lowConfidenceRecommendation ? 'Needs More Photos' : bundle.caseFile.finalRecommendation.decision)
+      setReviewedConfirmation(false)
+      setBanner({ tone: 'success', message: 'AI Case File generated and saved to agent storage.' })
+    } finally {
+      setPipeline(null)
     }
-    if (!seniorAdjusterReviewed) {
-      setBanner({ tone: 'info', message: 'Senior adjuster review must be checked before authorization.' })
-      return
+  }
+
+  const persistHumanReview = (eventType: 'review_saved' | 'review_applied_before_decision') => {
+    if (!selectedClaim || !selectedCaseFile) {
+      setBanner({ tone: 'info', message: 'Generate AI Case File before saving review changes.' })
+      return false
     }
-    const nowIso = new Date().toISOString()
-    const trimmedNote = seniorAdjusterNote.trim()
+    if (selectedClaim.readOnlyImported) {
+      setBanner({ tone: 'info', message: 'Imported customer snapshot is read-only in agent mode.' })
+      return false
+    }
+    if (!reviewSeverity || !reviewNextStep || parsedEstimateTotal === null || !durationIsValid || parsedDurationMin === null || parsedDurationMax === null) {
+      setBanner({ tone: 'info', message: 'Complete all Human Review fields before saving.' })
+      return false
+    }
+    if (hasMissingChangeReason) {
+      setBanner({ tone: 'info', message: 'Reason for change is required for each field that differs from AI.' })
+      return false
+    }
+
+    const overrideReasons: NonNullable<NonNullable<AgentClaim['agentDecision']>['overrideReasons']> = {}
+    changes.forEach((change) => {
+      if (!change.reason) {
+        return
+      }
+      if (change.field === 'severity') {
+        overrideReasons.severity = change.reason
+      }
+      if (change.field === 'nextStep') {
+        overrideReasons.nextStep = change.reason
+      }
+      if (change.field === 'estimate') {
+        overrideReasons.estimatedRepairCost = change.reason
+      }
+      if (change.field === 'duration') {
+        overrideReasons.durationRange = change.reason
+      }
+      if (change.field === 'notes') {
+        overrideReasons.notes = change.reason
+      }
+    })
+
+    const now = new Date().toISOString()
 
     updateClaim(selectedClaim.id, {
-      status: 'Authorized',
-      agentDecision: buildAgentDecision(),
-      agentNotes: agentNotes.trim(),
-      approvedAt: nowIso,
-      authorizedAt: nowIso,
-      seniorApproval: {
-        reviewed: true,
-        reviewedAt: selectedClaim.seniorApproval?.reviewedAt ?? nowIso,
-        note: trimmedNote,
-        approvedAt: nowIso,
+      status: selectedClaim.status === 'New' ? 'In Review' : selectedClaim.status,
+      draftSavedAt: now,
+      agentNotes: reviewNotes,
+      agentDecision: {
+        ...(selectedClaim.agentDecision ?? {}),
+        severity: reviewSeverity,
+        caseFileNextStep: reviewNextStep,
+        estimatedRepairCost: parsedEstimateTotal,
+        predictedDurationDaysMin: parsedDurationMin,
+        predictedDurationDaysMax: parsedDurationMax,
+        lineItems: selectedCaseFile.estimate.lineItems,
+        overrideReasons,
       },
     })
+
     appendClaimEvent(selectedClaim.id, {
-      type: 'authorized',
-      message: 'Authorized (Simulated senior adjuster approval).',
+      type: eventType,
+      message:
+        eventType === 'review_saved'
+          ? `Human review saved (${changes.length} change${changes.length === 1 ? '' : 's'}).`
+          : `Human review auto-saved before decision (${changes.length} change${changes.length === 1 ? '' : 's'}).`,
     })
+
     refreshClaims()
-    setBanner({ tone: 'success', message: 'Authorized (Simulated senior adjuster approval)' })
+    return true
   }
 
-  const handleAssignToMe = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
+  const handleSaveReview = () => {
+    const persisted = persistHumanReview('review_saved')
+    if (!persisted) {
       return
     }
-    updateClaim(editableClaim.id, { assignee: CURRENT_AGENT_NAME })
-    appendClaimEvent(editableClaim.id, {
-      type: 'assignment',
-      message: `Assigned to ${CURRENT_AGENT_NAME}.`,
-    })
-    refreshClaims()
-    setBanner({ tone: 'info', message: `Assigned to ${CURRENT_AGENT_NAME}.` })
+    setBanner({ tone: 'success', message: 'Human review saved.' })
   }
 
-  const handleMarkNeedsMorePhotos = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
+  const handleDecisionAction = (decision: AgentCaseDecision) => {
+    if (!selectedClaim || !selectedCaseFile) {
+      setBanner({ tone: 'info', message: 'Generate AI Case File before taking a decision.' })
       return
     }
-    updateClaim(editableClaim.id, { status: 'Needs More Photos' })
-    appendClaimEvent(editableClaim.id, {
-      type: 'status_change',
-      message: 'Status changed to Needs More Photos.',
-    })
-    refreshClaims()
-    setBanner({ tone: 'info', message: 'Marked as Needs More Photos.' })
-  }
+    if (selectedClaim.readOnlyImported) {
+      setBanner({ tone: 'info', message: 'Imported customer snapshot is read-only in agent mode.' })
+      return
+    }
+    if (!reviewedConfirmation) {
+      setBanner({ tone: 'info', message: 'Confirm that you reviewed the AI Case File and changes.' })
+      return
+    }
 
-  const handleSubmitForApproval = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
+    const persisted = persistHumanReview('review_applied_before_decision')
+    if (!persisted) {
       return
     }
-    if (editableClaim.status !== 'In Review') {
-      setBanner({ tone: 'info', message: 'Claim must be In Review before submitting for approval.' })
-      return
-    }
-    if (hasMissingOverrideReason()) {
-      setBanner({ tone: 'info', message: 'Reason for override is required for all changed AI-suggested fields.' })
-      return
-    }
-    updateClaim(editableClaim.id, {
-      status: 'Pending Approval',
-      agentDecision: buildAgentDecision(),
-      agentNotes: agentNotes.trim(),
-      submittedForApprovalAt: new Date().toISOString(),
-      seniorApproval: {
-        reviewed: false,
-        note: '',
-      },
-    })
-    appendClaimEvent(editableClaim.id, {
-      type: 'submitted_for_approval',
-      message: 'Submitted for senior adjuster approval. Claim edits locked.',
-    })
-    refreshClaims()
-    setSeniorAdjusterReviewed(false)
-    setSeniorAdjusterNote('')
-    setBanner({ tone: 'info', message: 'Submitted for approval.' })
-  }
 
-  const handleRequestAdditionalPhotos = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    updateClaim(editableClaim.id, {
-      status: 'Needs More Photos',
-      photoRequest: {
-        requested: true,
-        requestedAt: new Date().toISOString(),
-        photosReceived: false,
-        checklist: REQUESTED_SHOT_CHECKLIST,
-      },
-    })
-    appendClaimEvent(editableClaim.id, {
-      type: 'photo_request',
-      message: 'Requested additional photos from customer.',
-    })
-    refreshClaims()
-    setBanner({ tone: 'info', message: 'Requested additional photos.' })
-  }
+    const now = new Date().toISOString()
+    const nextStatus = decisionToStatus(decision)
 
-  const handlePhotosReceived = () => {
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    updateClaim(editableClaim.id, {
-      status: 'In Review',
-      photoRequest: {
-        ...(editableClaim.photoRequest ?? {
-          requested: true,
-          checklist: REQUESTED_SHOT_CHECKLIST,
-        }),
-        requested: true,
-        photosReceived: true,
-      },
-    })
-    appendClaimEvent(editableClaim.id, {
-      type: 'photos_received',
-      message: 'Additional photos received. Claim moved back to In Review.',
-    })
-    refreshClaims()
-    setBanner({ tone: 'info', message: 'Photos received. Claim moved to In Review.' })
-  }
-
-  const handleResetSeverityToAI = () => {
-    if (!aiAssessment) {
-      return
-    }
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    setAgentFinalSeverity(aiAssessment.severity)
-    setOverrideReasons((current) => ({ ...current, severity: undefined }))
-    appendClaimEvent(editableClaim.id, {
-      type: 'reset_to_ai',
-      message: 'Severity reset to AI suggestion.',
-    })
-    refreshClaims()
-  }
-
-  const handleResetNextStepToAI = () => {
-    if (!aiAssessment) {
-      return
-    }
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    setAgentFinalNextStep(aiAssessment.recommendedNextStep)
-    setOverrideReasons((current) => ({ ...current, recommendedNextStep: undefined }))
-    appendClaimEvent(editableClaim.id, {
-      type: 'reset_to_ai',
-      message: 'Recommended next step reset to AI suggestion.',
-    })
-    refreshClaims()
-  }
-
-  const handleResetEstimateToAI = () => {
-    if (aiSuggestedEstimate === null) {
-      return
-    }
-    const editableClaim = guardEditableClaim(selectedClaim)
-    if (!editableClaim) {
-      return
-    }
-    setFinalEstimateManuallyEdited(true)
-    setEstimatedRepairCost(String(aiSuggestedEstimate))
-    setOverrideReasons((current) => ({
-      ...current,
-      estimatedRepairCost: undefined,
-      finalEstimateVsTotal: undefined,
-    }))
-    appendClaimEvent(editableClaim.id, {
-      type: 'reset_to_ai',
-      message: 'Estimate reset to AI suggestion.',
-    })
-    refreshClaims()
-  }
-
-  const handleRefreshComparableClaims = () => {
-    setComparableRefreshTick((current) => current + 1)
-  }
-
-  const handleSeniorReviewToggle = (checked: boolean) => {
-    if (!selectedClaim || selectedClaim.readOnlyImported || selectedClaim.status !== 'Pending Approval') {
-      return
-    }
-    const reviewedAt = checked ? new Date().toISOString() : undefined
-    const trimmedNote = seniorAdjusterNote.trim()
-    setSeniorAdjusterReviewed(checked)
     updateClaim(selectedClaim.id, {
-      seniorApproval: {
-        reviewed: checked,
-        reviewedAt,
-        note: trimmedNote,
+      status: nextStatus,
+      submittedForApprovalAt: decision === 'Escalate' ? now : selectedClaim.submittedForApprovalAt,
+      authorizedAt: decision === 'Authorize' ? now : selectedClaim.authorizedAt,
+      approvedAt: decision === 'Authorize' ? now : selectedClaim.approvedAt,
+      photoRequest:
+        decision === 'Needs More Photos'
+          ? {
+              requested: true,
+              requestedAt: now,
+              photosReceived: false,
+              checklist: REQUESTED_SHOT_CHECKLIST,
+            }
+          : selectedClaim.photoRequest,
+      agentDecision: {
+        ...(selectedClaim.agentDecision ?? {}),
+        decisionChoice: decision,
+        decisionConfirmedAt: now,
       },
     })
-    appendClaimEvent(selectedClaim.id, {
-      type: 'senior_review',
-      message: checked
-        ? 'Senior adjuster marked assessment and estimate as reviewed.'
-        : 'Senior adjuster review checkbox cleared.',
-    })
-    refreshClaims()
-  }
 
-  const handleSaveSeniorNote = () => {
-    if (!selectedClaim || selectedClaim.readOnlyImported || selectedClaim.status !== 'Pending Approval') {
-      return
-    }
-    const trimmedNote = seniorAdjusterNote.trim()
-    updateClaim(selectedClaim.id, {
-      seniorApproval: {
-        reviewed: seniorAdjusterReviewed,
-        reviewedAt: seniorAdjusterReviewed ? selectedClaim.seniorApproval?.reviewedAt ?? new Date().toISOString() : undefined,
-        note: trimmedNote,
-      },
-    })
     appendClaimEvent(selectedClaim.id, {
-      type: 'senior_note',
-      message: trimmedNote ? 'Senior adjuster note saved.' : 'Senior adjuster note cleared.',
+      type: 'decision_applied',
+      message: `Decision applied: ${humanDecisionLabel(decision)}. Status set to ${nextStatus}.`,
     })
+
     refreshClaims()
-    setBanner({ tone: 'info', message: 'Senior adjuster note saved.' })
+    setSelectedDecision(decision)
+    setReviewedConfirmation(false)
+    setBanner({ tone: 'success', message: `Decision applied: ${humanDecisionLabel(decision)}.` })
   }
 
   const handleResetDemo = () => {
     const nextClaims = resetAgentClaimsForDemo()
     setClaims(nextClaims)
     setSelectedClaimId(nextClaims[0]?.id ?? '')
-    setActivePhotoId(null)
-    setAgentFinalSeverity('')
-    setAgentFinalNextStep('')
-    setLineItems([createEmptyLineItem()])
-    setEstimatedRepairCost('')
-    setFinalEstimateManuallyEdited(false)
-    setOverrideReasons({})
-    setAgentNotes('')
-    setSeniorAdjusterReviewed(false)
-    setSeniorAdjusterNote('')
-    setComparableRefreshTick(0)
     setSearchQuery('')
     setStatusFilter('All')
-    setSourceFilter('All')
-    setSortOrder('newest')
-    setBanner({ tone: 'info', message: 'Agent demo reset to default mocked claims.' })
+    setSortOrder('updated_desc')
+    setPipeline(null)
+    setBanner({ tone: 'info', message: 'Agent demo queue reset.' })
   }
 
   return (
     <div className="agent-review">
       <div className="agent-review__shell">
-        <div className="agent-review__nav">
-          <Link to="/" className="button button--ghost">
-            ← Back to Customer Flow
-          </Link>
-          <button type="button" className="button button--ghost" onClick={handleResetDemo}>
-            Reset Agent Demo
-          </button>
-        </div>
+        <nav className="agent-top-links" aria-label="Top navigation">
+          <span className="agent-top-links__item is-active">Claims Agent Review</span>
+          <div className="agent-top-links__group">
+            <Link to="/" className="agent-top-links__item">
+              Customer Workflow
+            </Link>
+            <Link to="/" className="agent-top-links__item">
+              Tow driver view
+            </Link>
+          </div>
+        </nav>
 
-        <header className="agent-review__header">
-          <div className="agent-review__headerTop">
-            <img src={fenderbenderLogo} alt="FenderBender Mutual" className="agent-review__logo" />
+        <header className="agent-hero">
+          <div className="agent-hero__brand">
+            <img src={fenderbenderLogo} alt="FenderBender Mutual" className="agent-hero__logo" />
             <div>
-              <p className="agent-review__eyebrow">Claims Agent Workspace</p>
-              <h1>Claims Agent Review</h1>
+              <p className="agent-hero__eyebrow">Claims Agent Workspace</p>
+              <h1>AI Case File Review</h1>
+              <p className="muted">
+                AI generates a complete recommended case package. Human agent reviews, adjusts if needed, and makes the
+                final decision.
+              </p>
             </div>
           </div>
-          <p className="muted">
-            Manual queue triage with AI-assisted damage assessment, estimate drafting, and simulated authorization.
-          </p>
+          <div className="agent-hero__actions">
+            <button type="button" className="button button--ghost" onClick={handleResetDemo}>
+              Reset Demo
+            </button>
+          </div>
         </header>
 
         <section className="agent-metrics">
-          <div className="agent-metrics__header">
-            <h2>Agent Metrics</h2>
-            <p className="muted">Live agent-only metrics from the current queue.</p>
-          </div>
-          <div className="agent-metrics__grid">
-            <div className="agent-metrics__card">
-              <span className="summary__label">Queue by status</span>
-              <div className="agent-metrics__list">
-                <div>
-                  <strong>{metrics.counts.New}</strong> New
-                </div>
-                <div>
-                  <strong>{metrics.counts['In Review']}</strong> In Review
-                </div>
-                <div>
-                  <strong>{metrics.counts['Needs More Photos']}</strong> Needs More Photos
-                </div>
-                <div>
-                  <strong>{metrics.counts['Pending Approval']}</strong> Pending Approval
-                </div>
-                <div>
-                  <strong>{metrics.counts.Authorized}</strong> Authorized
-                </div>
-              </div>
-            </div>
-            <div className="agent-metrics__card">
-              <span className="summary__label">Avg time to authorize</span>
-              <p className="agent-metrics__value">
-                {metrics.avgAuthorizeMs === null ? '—' : formatDurationMs(metrics.avgAuthorizeMs)}
-              </p>
-              <p className="muted">Based on claims with open + authorized timestamps.</p>
-            </div>
-            <div className="agent-metrics__card">
-              <span className="summary__label">Overrides</span>
-              <p className="agent-metrics__value">{metrics.overridePercent}%</p>
-              <p className="muted">Claims with at least one agent override.</p>
-            </div>
-            <div className="agent-metrics__card">
-              <span className="summary__label">Low confidence</span>
-              <p className="agent-metrics__value">{metrics.lowConfidencePercent}%</p>
-              <p className="muted">AI assessments below 0.60 confidence.</p>
-            </div>
-          </div>
+          <article className="agent-metrics__card">
+            <p className="summary__label">Queue by status</p>
+            <p>
+              New <strong>{metrics.counts.New}</strong>
+            </p>
+            <p>
+              In Review <strong>{metrics.counts['In Review']}</strong>
+            </p>
+            <p>
+              Needs More Photos <strong>{metrics.counts['Needs More Photos']}</strong>
+            </p>
+            <p>
+              Pending Approval <strong>{metrics.counts['Pending Approval']}</strong>
+            </p>
+            <p>
+              Authorized <strong>{metrics.counts.Authorized}</strong>
+            </p>
+          </article>
+          <article className="agent-metrics__card">
+            <p className="summary__label">Average time to authorize</p>
+            <p className="agent-metrics__value">{metrics.avgAuthorizeTime}</p>
+          </article>
+          <article className="agent-metrics__card">
+            <p className="summary__label">Claims with overrides</p>
+            <p className="agent-metrics__value">{metrics.overridePercent}%</p>
+          </article>
+          <article className="agent-metrics__card">
+            <p className="summary__label">Low-confidence assessments</p>
+            <p className="agent-metrics__value">{metrics.lowConfidencePercent}%</p>
+          </article>
         </section>
 
-        <div className="agent-review__roles">
-          <div className="agent-role-card">
-            <span className="agent-pill agent-pill--ai">AI Suggested</span>
-            <ul>
-              <li>Damage areas</li>
-              <li>Severity + confidence</li>
-              <li>Suggested cost band</li>
-            </ul>
+        {banner && (
+          <div
+            className={`agent-banner ${
+              banner.tone === 'success' ? 'agent-banner--success' : banner.tone === 'warn' ? 'agent-banner--warn' : ''
+            }`}
+            role="status"
+          >
+            {banner.message}
           </div>
-          <div className="agent-role-card">
-            <span className="agent-pill agent-pill--agent">Agent Finalized</span>
-            <ul>
-              <li>Review claim details</li>
-              <li>Edit estimate + notes</li>
-              <li>Approve authorization</li>
-            </ul>
-          </div>
-        </div>
+        )}
 
-        <div className="agent-review__grid">
-          <section className="agent-queue">
-            <div className="agent-queue__header">
+        <section className="agent-layout">
+          <aside className="agent-queue">
+            <div className="agent-section__header">
               <h2>Claim Queue</h2>
-              <p className="muted">{queueClaims.length} active claims</p>
-              <label className="agent-queue__search">
+            </div>
+
+            <div className="agent-controls">
+              <label className="agent-field">
                 <span>Search</span>
                 <input
                   type="text"
+                  className="agent-input"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Find by claim ID or vehicle"
+                  placeholder="Claim id, vehicle, policy, assignee"
                 />
               </label>
-              <div className="agent-queue__controls">
-                <label className="agent-queue__control">
-                  <span>Status</span>
-                  <select
-                    value={statusFilter}
-                    onChange={(event) => setStatusFilter(event.target.value as 'All' | AgentClaimStatus)}
-                  >
-                    <option value="All">All</option>
-                    <option value="New">New</option>
-                    <option value="In Review">In Review</option>
-                    <option value="Pending Approval">Pending Approval</option>
-                    <option value="Needs More Photos">Needs More Photos</option>
-                    <option value="Authorized">Authorized</option>
-                  </select>
-                </label>
-                <label className="agent-queue__control">
-                  <span>Source</span>
-                  <select
-                    value={sourceFilter}
-                    onChange={(event) => setSourceFilter(event.target.value as 'All' | 'customer_flow' | 'mock')}
-                  >
-                    <option value="All">All</option>
-                    <option value="customer_flow">Customer flow</option>
-                    <option value="mock">Mocked</option>
-                  </select>
-                </label>
-                <label className="agent-queue__control">
-                  <span>Sort</span>
-                  <select
-                    value={sortOrder}
-                    onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest' | 'status')}
-                  >
-                    <option value="newest">Newest first</option>
-                    <option value="oldest">Oldest first</option>
-                    <option value="status">Status</option>
-                  </select>
-                </label>
-              </div>
+              <label className="agent-field">
+                <span>Status</span>
+                <select
+                  className="agent-input"
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value as 'All' | AgentClaimStatus)}
+                >
+                  {STATUS_FILTERS.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="agent-field">
+                <span>Sort</span>
+                <select
+                  className="agent-input"
+                  value={sortOrder}
+                  onChange={(event) => setSortOrder(event.target.value as 'updated_desc' | 'updated_asc')}
+                >
+                  <option value="updated_desc">Last updated (newest)</option>
+                  <option value="updated_asc">Last updated (oldest)</option>
+                </select>
+              </label>
             </div>
+
             <div className="agent-queue__list">
               {queueClaims.map((claim) => (
                 <button
-                  type="button"
                   key={claim.id}
-                  className={`agent-queue__item ${selectedClaimId === claim.id ? 'is-selected' : ''}`}
+                  type="button"
+                  className={`agent-queue__item ${selectedClaimId === claim.id ? 'is-active' : ''}`}
                   onClick={() => setSelectedClaimId(claim.id)}
                 >
-                  <div className="agent-queue__top">
+                  <div className="agent-queue__row">
                     <strong>{claim.id}</strong>
                     <span className={statusClassName(claim.status)}>{claim.status}</span>
                   </div>
-                  {claim.queueLabel && <span className="agent-queue__label">{claim.queueLabel}</span>}
-                  <p className="agent-queue__vehicle">
+                  <p>
                     {claim.vehicle.year} {claim.vehicle.make} {claim.vehicle.model}
                   </p>
-                  <p className="agent-queue__meta">
-                    Assignee: <strong>{claim.assignee || 'Unassigned'}</strong>
-                  </p>
-                  <p className="muted">Updated: {formatSubmittedAt(claim.lastUpdatedAt)}</p>
+                  <p className="muted">Assignee: {claim.assignee ?? 'Unassigned'}</p>
+                  <p className="muted">Updated: {formatDateTime(claim.lastUpdatedAt)}</p>
                 </button>
               ))}
+              {queueClaims.length === 0 && <p className="muted">No claims match current filters.</p>}
             </div>
-          </section>
+          </aside>
 
           <section className="agent-detail">
-            {!selectedClaim ? (
-              <p className="muted">No claim selected.</p>
-            ) : (
+            {!selectedClaim && <p className="muted">Select a claim to start review.</p>}
+
+            {selectedClaim && (
               <>
-                {banner && (
-                  <div className={`agent-banner agent-banner--${banner.tone}`} role="status">
-                    {banner.message}
-                  </div>
-                )}
-
-                {isLowConfidence && (
-                  <div className="agent-banner agent-banner--warn" role="alert">
-                    Low AI confidence ({Math.round((aiConfidenceNormalized ?? 0) * 100)}%). Default recommendation:
-                    Needs More Photos.
-                  </div>
-                )}
-
-                {isImportedReadOnly && (
-                  <div className="callout">
-                    <p className="muted" style={{ margin: 0 }}>
-                      Imported from customer flow as a read-only snapshot. Use this view for review context.
-                    </p>
-                  </div>
-                )}
-
-                {isPendingApproval && (
-                  <div className="agent-banner agent-banner--info" role="status">
-                    Pending senior adjuster review. Claim edits are locked until final authorization.
-                  </div>
-                )}
-
-                {isAuthorized && (
-                  <div className="agent-banner agent-banner--success" role="status">
-                    Authorized (Simulated senior adjuster approval)
-                  </div>
-                )}
-
-                <div className="agent-section">
+                <div className="agent-card">
                   <div className="agent-section__header">
                     <h2>Claim Summary</h2>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handleAssignToMe}
-                      disabled={isEditLocked}
-                    >
-                      Assign to me
-                    </button>
+                    <div className="agent-actions">
+                      <button
+                        type="button"
+                        className="button button--ghost"
+                        onClick={assignSelectedClaimToMe}
+                        disabled={selectedClaim.readOnlyImported || selectedClaim.assignee === CURRENT_AGENT_NAME}
+                      >
+                        {selectedClaim.assignee === CURRENT_AGENT_NAME ? 'Assigned to me' : 'Assign to me'}
+                      </button>
+                    </div>
                   </div>
-                  <div className="agent-summary-grid">
+
+                  <div className="summary-grid">
                     <div>
-                      <span className="summary__label">Claim ID</span>
+                      <span className="summary__label">Claim</span>
                       <span className="summary__value">{selectedClaim.id}</span>
                     </div>
                     <div>
@@ -1091,156 +753,38 @@ export default function AgentReview() {
                       </span>
                     </div>
                     <div>
-                      <span className="summary__label">Drivable</span>
-                      <span className="summary__value">{selectedClaim.drivable === true ? 'Yes' : 'No'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Other party involved</span>
-                      <span className="summary__value">{selectedClaim.hasOtherParty === true ? 'Yes' : 'No'}</span>
+                      <span className="summary__label">Policy</span>
+                      <span className="summary__value">{selectedClaim.policy?.policyId ?? 'N/A'}</span>
                     </div>
                     <div>
                       <span className="summary__label">Submitted</span>
-                      <span className="summary__value">{formatSubmittedAt(selectedClaim.submittedAt)}</span>
+                      <span className="summary__value">{formatDateTime(selectedClaim.submittedAt)}</span>
                     </div>
                     <div>
-                      <span className="summary__label">Status</span>
-                      <span className="summary__value">{selectedClaim.status}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Assignee</span>
-                      <span className="summary__value">{selectedClaim.assignee || 'Unassigned'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Last updated</span>
-                      <span className="summary__value">{formatSubmittedAt(selectedClaim.lastUpdatedAt)}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Open → AI</span>
+                      <span className="summary__label">Drivable</span>
                       <span className="summary__value">
-                        {formatDuration(selectedClaim.openedAt, selectedClaim.aiAssessedAt)}
+                        {selectedClaim.drivable === null ? 'Unknown' : selectedClaim.drivable ? 'Yes' : 'No'}
                       </span>
                     </div>
                     <div>
-                      <span className="summary__label">Open → Draft</span>
+                      <span className="summary__label">Other party</span>
                       <span className="summary__value">
-                        {formatDuration(selectedClaim.openedAt, selectedClaim.draftSavedAt)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Open → Authorized</span>
-                      <span className="summary__value">
-                        {formatDuration(selectedClaim.openedAt, selectedClaim.authorizedAt)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Policy ID</span>
-                      <span className="summary__value">{selectedClaim.policy?.policyId ?? 'Not captured'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Named insured</span>
-                      <span className="summary__value">{selectedClaim.policy?.insuredName ?? 'Not captured'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Coverage</span>
-                      <span className="summary__value">
-                        {selectedClaim.policy?.coverage ? selectedClaim.policy.coverage : 'Not captured'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Deductible</span>
-                      <span className="summary__value">
-                        {typeof selectedClaim.policy?.deductible === 'number'
-                          ? `$${selectedClaim.policy.deductible}`
-                          : 'Not captured'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Rental coverage</span>
-                      <span className="summary__value">
-                        {selectedClaim.policy ? (selectedClaim.policy.rentalCoverage ? 'Yes' : 'No') : 'Not captured'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="agent-section">
-                  <h2>Incident Intake Details</h2>
-                  <div className="agent-summary-grid">
-                    <div>
-                      <span className="summary__label">Tow requested</span>
-                      <span className="summary__value">{selectedClaim.incident?.towRequested ? 'Yes' : 'No'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Tow status</span>
-                      <span className="summary__value">{selectedClaim.incident?.towStatus ?? 'Not requested'}</span>
-                    </div>
-                    <div>
-                      <span className="summary__label">Other party details</span>
-                      <span className="summary__value">
-                        {selectedClaim.incident?.hasOtherParty ? 'Captured' : 'Not involved'}
+                        {selectedClaim.hasOtherParty === null ? 'Unknown' : selectedClaim.hasOtherParty ? 'Yes' : 'No'}
                       </span>
                     </div>
                   </div>
 
-                  <div className="callout">
-                    <span className="summary__label">Customer incident description</span>
-                    <p className="muted" style={{ marginTop: 6 }}>
-                      {selectedClaim.incident?.incidentDescription?.trim() || 'No incident description provided.'}
-                    </p>
-                  </div>
-
-                  <div className="callout">
-                    <span className="summary__label">AI-assisted intake narration</span>
-                    <p className="muted" style={{ marginTop: 6 }}>
-                      {selectedClaim.incident?.incidentNarrationText?.trim() || 'No narration was accepted.'}
-                    </p>
-                  </div>
-
-                  {selectedClaim.incident?.hasOtherParty === true && (
-                    <div className="summary summary--compact">
-                      <div>
-                        <span className="summary__label">Other driver</span>
-                        <span className="summary__value">
-                          {selectedClaim.incident.otherPartyDetails?.otherDriverName || 'Not captured'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Contact</span>
-                        <span className="summary__value">
-                          {selectedClaim.incident.otherPartyDetails?.otherContact || 'Not captured'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Vehicle</span>
-                        <span className="summary__value">
-                          {selectedClaim.incident.otherPartyDetails?.otherVehicleMakeModel || 'Not captured'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Insurance carrier</span>
-                        <span className="summary__value">
-                          {selectedClaim.incident.otherPartyDetails?.insuranceCarrier || 'Not captured'}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="agent-section">
-                  <div className="agent-section__header">
-                    <h2>Photo Viewer</h2>
-                  </div>
-                  {selectedPhoto ? (
+                  {selectedClaim.photos.length > 0 && (
                     <>
-                      <div className="agent-photo-main">
-                        <img src={selectedPhoto.url} alt={selectedPhoto.name} />
+                      <div className="agent-photo-viewer">
+                        {selectedPhoto && <img src={selectedPhoto.url} alt={selectedPhoto.name} />}
                       </div>
-                      <div className="agent-photo-row">
+                      <div className="agent-photo-strip">
                         {selectedClaim.photos.map((photo) => (
                           <button
-                            type="button"
                             key={photo.id}
-                            className={`agent-photo-thumb ${selectedPhoto.id === photo.id ? 'is-active' : ''}`}
+                            type="button"
+                            className={`agent-photo-thumb ${selectedPhoto?.id === photo.id ? 'is-active' : ''}`}
                             onClick={() => setActivePhotoId(photo.id)}
                           >
                             <img src={photo.url} alt={photo.name} />
@@ -1248,542 +792,382 @@ export default function AgentReview() {
                         ))}
                       </div>
                     </>
-                  ) : (
-                    <p className="muted">No photos were attached to this claim.</p>
                   )}
                 </div>
 
-                <div className="agent-section">
+                <div className="agent-card">
                   <div className="agent-section__header">
-                    <h2>AI Damage Assessment</h2>
-                    <span className="agent-pill agent-pill--ai">AI Suggested</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="button button--primary"
-                    onClick={() => void handleRunAssessment()}
-                    disabled={assessingClaimId === selectedClaim.id || isEditLocked}
-                  >
-                    {assessingClaimId === selectedClaim.id ? 'Assessing...' : 'Run AI Damage Assessment'}
-                  </button>
-
-                  <div className="agent-actions">
+                    <h2>AI Case File</h2>
                     <button
                       type="button"
-                      className="button button--ghost"
-                      onClick={handleRequestAdditionalPhotos}
-                      disabled={isEditLocked}
+                      className="button button--primary"
+                      onClick={handleGenerateCaseFile}
+                      disabled={Boolean(pipeline && pipeline.claimId === selectedClaim.id) || selectedClaim.readOnlyImported}
                     >
-                      Request additional photos
-                    </button>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handlePhotosReceived}
-                      disabled={isEditLocked || !photoRequest?.requested || Boolean(photoRequest?.photosReceived)}
-                    >
-                      {photoRequest?.photosReceived ? 'Photos received' : 'Mark photos received'}
+                      {selectedCaseFile ? 'Regenerate AI Case File' : 'Generate AI Case File'}
                     </button>
                   </div>
 
-                  {aiAssessment && (
-                    <div className="agent-ai-card">
-                      <div>
-                        <span className="summary__label">Damage areas</span>
-                        <span className="summary__value">{aiAssessment.damageTypes.join(', ')}</span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Severity</span>
-                        <span className="summary__value">{aiAssessment.severity}</span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Confidence</span>
-                        <span className="summary__value">{aiAssessment.confidence}%</span>
-                      </div>
-                      <div>
-                        <span className="summary__label">Suggested next step</span>
-                        <span className="summary__value">{aiAssessment.recommendedNextStep}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {photoRequest?.requested && (
-                    <div className="agent-photo-checklist">
-                      <p className="agent-photo-checklist__title">Suggested additional shots</p>
-                      <ul className="agent-photo-checklist__list">
-                        {(photoRequest.checklist && photoRequest.checklist.length > 0
-                          ? photoRequest.checklist
-                          : REQUESTED_SHOT_CHECKLIST
-                        ).map((item) => (
-                          <li key={item}>{item}</li>
+                  {pipeline && pipeline.claimId === selectedClaim.id && (
+                    <div className="agent-pipeline">
+                      <p className="summary__label">AI pipeline running</p>
+                      <ol>
+                        {AI_CASE_PIPELINE_STEPS.map((step, index) => (
+                          <li
+                            key={step}
+                            className={
+                              index < pipeline.stepIndex ? 'is-complete' : index === pipeline.stepIndex ? 'is-active' : ''
+                            }
+                          >
+                            {step}
+                          </li>
                         ))}
-                      </ul>
+                      </ol>
+                    </div>
+                  )}
+
+                  {!selectedCaseFile && !pipeline && (
+                    <p className="muted">Generate the AI Case File to produce one complete recommendation package.</p>
+                  )}
+
+                  {selectedCaseFile && (
+                    <div className="agent-case-grid">
+                      <article className="agent-case-card">
+                        <h3>Damage summary</h3>
+                        <p>Impacted areas: {selectedCaseFile.damageSummary.impactedAreas.join(', ') || 'None detected'}</p>
+                        <p>Photos reviewed: {selectedCaseFile.damageSummary.photoCount}</p>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Severity</h3>
+                        <p>
+                          <strong>{selectedCaseFile.severity.value}</strong> ({formatConfidence(selectedCaseFile.severity.confidence)})
+                        </p>
+                        <p className="muted">{selectedCaseFile.severity.explanation}</p>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Recommended next step</h3>
+                        <p>
+                          <strong>{selectedCaseFile.nextStep.value}</strong> ({formatConfidence(selectedCaseFile.nextStep.confidence)})
+                        </p>
+                        <p className="muted">{selectedCaseFile.nextStep.explanation}</p>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Estimate</h3>
+                        <p>
+                          Cost band: {formatCurrency(selectedCaseFile.estimate.costBand.min)} -{' '}
+                          {formatCurrency(selectedCaseFile.estimate.costBand.max)}
+                        </p>
+                        <p>
+                          AI line-item total: <strong>{formatCurrency(selectedCaseFile.estimate.total)}</strong> (
+                          {formatConfidence(selectedCaseFile.estimate.confidence)})
+                        </p>
+                        <p className="muted">{selectedCaseFile.estimate.explanation}</p>
+                        <div className="agent-line-items">
+                          {selectedCaseFile.estimate.lineItems.map((line) => (
+                            <p key={line.id}>
+                              {line.description} ({line.category}) - {formatCurrency(line.amount)}
+                            </p>
+                          ))}
+                        </div>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Duration</h3>
+                        <p>
+                          {selectedCaseFile.duration.minDays}-{selectedCaseFile.duration.maxDays} days (
+                          {formatConfidence(selectedCaseFile.duration.confidence)})
+                        </p>
+                        <p className="muted">{selectedCaseFile.duration.explanation}</p>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Similar claims</h3>
+                        <p className="muted">Based on AI-detected damage pattern</p>
+                        {selectedCaseFile.similarClaims.typicalCostRange && (
+                          <p>
+                            Typical range: {formatCurrency(selectedCaseFile.similarClaims.typicalCostRange.min)} -{' '}
+                            {formatCurrency(selectedCaseFile.similarClaims.typicalCostRange.max)}
+                          </p>
+                        )}
+                        <div className="agent-line-items">
+                          {selectedCaseFile.similarClaims.matches.map((match) => (
+                            <p key={match.id}>
+                              {match.vehicleMake} {match.vehicleModel} / {match.severity} / {formatCurrency(match.finalRepairCost)}
+                            </p>
+                          ))}
+                        </div>
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>AI signals</h3>
+                        {selectedCaseFile.signals.length === 0 ? (
+                          <p className="muted">No anomaly / needs-review signals.</p>
+                        ) : (
+                          <div className="agent-line-items">
+                            {selectedCaseFile.signals.map((signal) => (
+                              <p key={signal.id}>
+                                <strong>{signal.severity}:</strong> {signal.title}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </article>
+
+                      <article className="agent-case-card">
+                        <h3>Final AI recommendation</h3>
+                        <p>
+                          <strong>{selectedCaseFile.finalRecommendation.decision}</strong> (
+                          {formatConfidence(selectedCaseFile.finalRecommendation.confidence)})
+                        </p>
+                        <p className="muted">{selectedCaseFile.finalRecommendation.explanation}</p>
+                        <p className="muted">Generated at {formatDateTime(selectedCaseFile.createdAt)}</p>
+                      </article>
                     </div>
                   )}
                 </div>
 
-                <div className="agent-section">
-                  <div className="agent-section__header">
-                    <h2>Similar Past Claims</h2>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handleRefreshComparableClaims}
-                      disabled={!aiAssessment}
-                    >
-                      Refresh matches
-                    </button>
-                  </div>
-                  <span className="agent-pill agent-pill--ai">Based on AI-detected damage pattern</span>
-
-                  {!aiAssessment ? (
-                    <p className="muted">Run AI assessment to find comparable claims</p>
-                  ) : (
-                    <>
-                      <div className="agent-comparable__range">
-                        <span className="summary__label">Estimated cost range from similar claims:</span>
-                        <strong>
-                          {comparableCostRange
-                            ? `$${comparableCostRange.min.toLocaleString()} - $${comparableCostRange.max.toLocaleString()} typical range`
-                            : 'No comparable matches found'}
-                        </strong>
+                {selectedCaseFile && (
+                  <>
+                    <div className="agent-card">
+                      <div className="agent-section__header">
+                        <h2>Human Review</h2>
+                        <button
+                          type="button"
+                          className="button button--ghost"
+                          onClick={handleSaveReview}
+                          disabled={isReadOnly}
+                        >
+                          Save Review
+                        </button>
                       </div>
 
-                      {severityOverridden && (
-                        <p className="agent-comparable__overrideNote">Updated based on agent-adjusted severity</p>
+                      <div className="human-review-grid">
+                        <label className="agent-field">
+                          <span>Severity</span>
+                          <select
+                            className="agent-input"
+                            value={reviewSeverity}
+                            onChange={(event) => setReviewSeverity(event.target.value as Severity)}
+                            disabled={isReadOnly}
+                          >
+                            <option value="">Select severity</option>
+                            <option value="Low">Low</option>
+                            <option value="Medium">Medium</option>
+                            <option value="High">High</option>
+                          </select>
+                        </label>
+
+                        <label className="agent-field">
+                          <span>Next step</span>
+                          <select
+                            className="agent-input"
+                            value={reviewNextStep}
+                            onChange={(event) => setReviewNextStep(event.target.value as AgentCaseNextStep)}
+                            disabled={isReadOnly}
+                          >
+                            <option value="">Select next step</option>
+                            <option value="Tow">Tow</option>
+                            <option value="Repair">Repair</option>
+                            <option value="Inspection">Inspection</option>
+                          </select>
+                        </label>
+
+                        <label className="agent-field">
+                          <span>Final estimate total</span>
+                          <input
+                            type="number"
+                            min={0}
+                            className="agent-input"
+                            value={reviewEstimateTotal}
+                            onChange={(event) => setReviewEstimateTotal(event.target.value)}
+                            disabled={isReadOnly}
+                          />
+                        </label>
+
+                        <div className="human-review-grid__duration">
+                          <label className="agent-field">
+                            <span>Duration min (days)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              className="agent-input"
+                              value={reviewDurationMin}
+                              onChange={(event) => setReviewDurationMin(event.target.value)}
+                              disabled={isReadOnly}
+                            />
+                          </label>
+                          <label className="agent-field">
+                            <span>Duration max (days)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              className="agent-input"
+                              value={reviewDurationMax}
+                              onChange={(event) => setReviewDurationMax(event.target.value)}
+                              disabled={isReadOnly}
+                            />
+                          </label>
+                        </div>
+
+                        <label className="agent-field">
+                          <span>Agent notes</span>
+                          <textarea
+                            className="agent-textarea"
+                            rows={3}
+                            value={reviewNotes}
+                            onChange={(event) => setReviewNotes(event.target.value)}
+                            disabled={isReadOnly}
+                          />
+                        </label>
+                      </div>
+
+                      {!durationIsValid && (reviewDurationMin.trim() || reviewDurationMax.trim()) && (
+                        <p className="muted">Duration min/max must be valid and min must be less than or equal to max.</p>
                       )}
 
-                      {comparableClaims.length === 0 ? (
-                        <p className="muted">No strong local matches found for this damage pattern.</p>
-                      ) : (
-                        <div className="agent-comparable__list">
-                          {comparableClaims.map((match) => (
-                            <article key={match.id} className="agent-comparable__item">
-                              <div className="agent-comparable__top">
-                                <strong>
-                                  {match.vehicleMake} {match.vehicleModel}
-                                </strong>
-                                <span className="agent-status">
-                                  {match.severity.charAt(0).toUpperCase()}
-                                  {match.severity.slice(1)}
-                                </span>
-                              </div>
-                              <p className="agent-comparable__meta">
-                                Impacted areas: {match.damageAreas.join(', ')}
-                              </p>
-                              <p className="agent-comparable__meta">
-                                Final repair cost: ${match.finalRepairCost.toLocaleString()} | Repair duration:{' '}
-                                {match.repairDurationDays} days
-                              </p>
-                              <p className="muted">{match.shortDescription}</p>
-                            </article>
+                      {changes.length > 0 && (
+                        <div className="agent-changes">
+                          <h3>Changes</h3>
+                          {changes.map((change) => (
+                            <label key={change.field} className="agent-field">
+                              <span>
+                                {change.field === 'severity'
+                                  ? 'Severity'
+                                  : change.field === 'nextStep'
+                                    ? 'Next step'
+                                    : change.field === 'estimate'
+                                      ? 'Final estimate total'
+                                      : change.field === 'duration'
+                                        ? 'Duration range'
+                                        : 'Notes'}{' '}
+                                changed: reason required
+                              </span>
+                              <textarea
+                                className="agent-textarea"
+                                rows={2}
+                                value={
+                                  change.field === 'severity'
+                                    ? reasonForChange.severity ?? ''
+                                    : change.field === 'nextStep'
+                                      ? reasonForChange.nextStep ?? ''
+                                      : change.field === 'estimate'
+                                        ? reasonForChange.estimate ?? ''
+                                        : change.field === 'duration'
+                                          ? reasonForChange.duration ?? ''
+                                          : reasonForChange.notes ?? ''
+                                }
+                                onChange={(event) =>
+                                  setReasonForChange((current) => ({
+                                    ...current,
+                                    [change.field]: event.target.value,
+                                  }))
+                                }
+                                disabled={isReadOnly}
+                                placeholder="Reason for change"
+                              />
+                            </label>
                           ))}
                         </div>
                       )}
-                    </>
-                  )}
-                </div>
-
-                <div className="agent-section">
-                  <div className="agent-section__header">
-                    <h2>Estimate & Authorization</h2>
-                    <span className="agent-pill agent-pill--agent">Agent Finalized</span>
-                  </div>
-
-                  <div className="agent-compare-grid">
-                    <div className="agent-compare-row">
-                      <span className="summary__label">Severity</span>
-                      <span className="agent-compare__ai">
-                        AI suggested: {aiAssessment?.severity ?? 'Not available'}
-                      </span>
-                      <div className="agent-compare__final">
-                        <span className="agent-compare__finalLabel">Agent final</span>
-                        <select
-                          className="agent-input"
-                          value={agentFinalSeverity}
-                          onChange={(event) => setAgentFinalSeverity(event.target.value as Severity | '')}
-                          disabled={isEditLocked}
-                        >
-                          <option value="">Select</option>
-                          <option value="Low">Low</option>
-                          <option value="Medium">Medium</option>
-                          <option value="High">High</option>
-                        </select>
-                      </div>
-                      {severityOverridden && (
-                        <div className="agent-override-controls">
-                          <label className="agent-field">
-                            <span>Reason for override</span>
-                            <textarea
-                              className="agent-textarea"
-                              rows={2}
-                              value={overrideReasons.severity ?? ''}
-                              onChange={(event) =>
-                                setOverrideReasons((current) => ({
-                                  ...current,
-                                  severity: event.target.value,
-                                }))
-                              }
-                              placeholder="Why did you override AI severity?"
-                              disabled={isEditLocked}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            className="button button--ghost"
-                            onClick={handleResetSeverityToAI}
-                            disabled={isEditLocked || !aiAssessment}
-                          >
-                            Reset to AI
-                          </button>
-                        </div>
-                      )}
                     </div>
 
-                    <div className="agent-compare-row">
-                      <span className="summary__label">Recommended next step</span>
-                      <span className="agent-compare__ai">
-                        AI suggested: {aiAssessment?.recommendedNextStep ?? 'Not available'}
-                      </span>
-                      <div className="agent-compare__final">
-                        <span className="agent-compare__finalLabel">Agent final</span>
-                        <select
-                          className="agent-input"
-                          value={agentFinalNextStep}
-                          onChange={(event) => setAgentFinalNextStep(event.target.value as RecommendedNextStep | '')}
-                          disabled={isEditLocked}
-                        >
-                          <option value="">Select</option>
-                          <option value="Approve">Approve</option>
-                          <option value="Review">Review</option>
-                          <option value="Escalate">Escalate</option>
-                        </select>
+                    <div className="agent-card">
+                      <h2>Decision</h2>
+
+                      <div className="agent-disclosure">
+                        AI provides recommendations. Human agent is accountable for the final decision.
                       </div>
-                      {nextStepOverridden && (
-                        <div className="agent-override-controls">
-                          <label className="agent-field">
-                            <span>Reason for override</span>
-                            <textarea
-                              className="agent-textarea"
-                              rows={2}
-                              value={overrideReasons.recommendedNextStep ?? ''}
-                              onChange={(event) =>
-                                setOverrideReasons((current) => ({
-                                  ...current,
-                                  recommendedNextStep: event.target.value,
-                                }))
-                              }
-                              placeholder="Why did you override AI recommendation?"
-                              disabled={isEditLocked}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            className="button button--ghost"
-                            onClick={handleResetNextStepToAI}
-                            disabled={isEditLocked || !aiAssessment}
-                          >
-                            Reset to AI
-                          </button>
+
+                      {lowConfidence && (
+                        <div className="agent-banner agent-banner--warn" role="alert">
+                          One or more AI confidence signals are below 0.6. Default decision is set to Request More
+                          Photos.
                         </div>
                       )}
-                    </div>
 
-                    <div className="agent-compare-row">
-                      <span className="summary__label">Estimate</span>
-                      <span className="agent-compare__ai">
-                        AI suggested:{' '}
-                        {aiCostBand
-                          ? `$${aiCostBand.min.toLocaleString()} - $${aiCostBand.max.toLocaleString()}`
-                          : 'Run AI assessment to generate'}
-                      </span>
-                      <div className="agent-line-items">
-                        <table className="agent-line-items__table">
-                          <thead>
-                            <tr>
-                              <th>Description</th>
-                              <th>Category</th>
-                              <th>Amount</th>
-                              <th />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {lineItems.map((item) => (
-                              <tr key={item.id}>
-                                <td>
-                                  <input
-                                    className="agent-input"
-                                    value={item.description}
-                                    onChange={(event) =>
-                                      handleUpdateLineItem(item.id, { description: event.target.value })
-                                    }
-                                    placeholder="e.g., Front bumper replacement"
-                                    disabled={isEditLocked}
-                                  />
-                                </td>
-                                <td>
-                                  <select
-                                    className="agent-input"
-                                    value={item.category}
-                                    onChange={(event) =>
-                                      handleUpdateLineItem(item.id, {
-                                        category: event.target.value as AgentEstimateCategory,
-                                      })
-                                    }
-                                    disabled={isEditLocked}
-                                  >
-                                    {ESTIMATE_CATEGORIES.map((category) => (
-                                      <option key={category} value={category}>
-                                        {category}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    className="agent-input"
-                                    value={item.amount}
-                                    onChange={(event) =>
-                                      handleUpdateLineItem(item.id, { amount: sanitizeAmount(event.target.value) })
-                                    }
-                                    disabled={isEditLocked}
-                                  />
-                                </td>
-                                <td>
-                                  <button
-                                    type="button"
-                                    className="button button--ghost"
-                                    onClick={() => handleRemoveLineItem(item.id)}
-                                    disabled={isEditLocked || lineItems.length <= 1}
-                                  >
-                                    Remove line
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <p className="muted">
+                        Default recommendation: <strong>{humanDecisionLabel(defaultDecision)}</strong>
+                      </p>
+
+                      <div className="agent-decision-options">
+                        {DECISION_OPTIONS.map((option) => (
+                          <label key={option.value} className="agent-radio">
+                            <input
+                              type="radio"
+                              name="agent-decision"
+                              value={option.value}
+                              checked={selectedDecision === option.value}
+                              onChange={() => setSelectedDecision(option.value)}
+                              disabled={isReadOnly}
+                            />
+                            <span>{option.label}</span>
+                          </label>
+                        ))}
                       </div>
+
+                      <label className="agent-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={reviewedConfirmation}
+                          onChange={(event) => setReviewedConfirmation(event.target.checked)}
+                          disabled={isReadOnly}
+                        />
+                        <span>Reviewed AI Case File and changes</span>
+                      </label>
 
                       <div className="agent-actions">
                         <button
                           type="button"
-                          className="button button--ghost"
-                          onClick={handleAddLineItem}
-                          disabled={isEditLocked || lineItems.length >= 8}
+                          className={`button ${selectedDecision === 'Authorize' ? 'button--primary' : 'button--ghost'}`}
+                          onClick={() => handleDecisionAction('Authorize')}
+                          disabled={isReadOnly}
                         >
-                          Add line
+                          Authorize Repairs (simulated)
+                        </button>
+                        <button
+                          type="button"
+                          className={`button ${selectedDecision === 'Needs More Photos' ? 'button--primary' : 'button--ghost'}`}
+                          onClick={() => handleDecisionAction('Needs More Photos')}
+                          disabled={isReadOnly}
+                        >
+                          Request More Photos
+                        </button>
+                        <button
+                          type="button"
+                          className={`button ${selectedDecision === 'Escalate' ? 'button--primary' : 'button--ghost'}`}
+                          onClick={() => handleDecisionAction('Escalate')}
+                          disabled={isReadOnly}
+                        >
+                          Escalate to Senior Adjuster (simulated)
                         </button>
                       </div>
-
-                      <div className="agent-compare__final">
-                        <span className="agent-compare__finalLabel">Line-item total</span>
-                        <span className="summary__value">${lineItemsTotal.toLocaleString()}</span>
-                      </div>
-
-                      <div className="agent-compare__final">
-                        <span className="agent-compare__finalLabel">Final estimate (Agent final)</span>
-                        <input
-                          type="number"
-                          min={0}
-                          className="agent-input"
-                          value={estimatedRepairCost}
-                          onChange={(event) => {
-                            setFinalEstimateManuallyEdited(true)
-                            setEstimatedRepairCost(event.target.value)
-                          }}
-                          placeholder="Defaults to line-item total"
-                          disabled={isEditLocked}
-                        />
-                      </div>
-
-                      {estimateOverridden && (
-                        <div className="agent-override-controls">
-                          <label className="agent-field">
-                            <span>Reason for override (AI suggestion)</span>
-                            <textarea
-                              className="agent-textarea"
-                              rows={2}
-                              value={overrideReasons.estimatedRepairCost ?? ''}
-                              onChange={(event) =>
-                                setOverrideReasons((current) => ({
-                                  ...current,
-                                  estimatedRepairCost: event.target.value,
-                                }))
-                              }
-                              placeholder="Why did you override AI estimate?"
-                              disabled={isEditLocked}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            className="button button--ghost"
-                            onClick={handleResetEstimateToAI}
-                            disabled={isEditLocked || aiSuggestedEstimate === null}
-                          >
-                            Reset to AI
-                          </button>
-                        </div>
-                      )}
-
-                      {finalEstimateDiffOverThreshold && (
-                        <div className="agent-override-controls">
-                          <label className="agent-field">
-                            <span>
-                              Reason for override ({Math.round(finalEstimateDiffRatio * 100)}% difference from total)
-                            </span>
-                            <textarea
-                              className="agent-textarea"
-                              rows={2}
-                              value={overrideReasons.finalEstimateVsTotal ?? ''}
-                              onChange={(event) =>
-                                setOverrideReasons((current) => ({
-                                  ...current,
-                                  finalEstimateVsTotal: event.target.value,
-                                }))
-                              }
-                              placeholder="Final estimate differs materially from line-item total. Why?"
-                              disabled={isEditLocked}
-                            />
-                          </label>
-                        </div>
-                      )}
                     </div>
-                  </div>
+                  </>
+                )}
 
-                  <label className="agent-field">
-                    <span>Agent Notes</span>
-                    <textarea
-                      className="agent-textarea"
-                      rows={4}
-                      value={agentNotes}
-                      onChange={(event) => setAgentNotes(event.target.value)}
-                      placeholder="Add review notes for file history"
-                      disabled={isEditLocked}
-                    />
-                  </label>
-
-                  {overrideSummary.length > 0 && (
-                    <div className="agent-overrides">
-                      <p className="agent-overrides__title">Overrides</p>
-                      <ul className="agent-overrides__list">
-                        {overrideSummary.map((item) => (
-                          <li key={item.field}>
-                            <strong>{item.field}:</strong> {item.reason}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  <div className="agent-actions">
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handleSaveDraft}
-                      disabled={isEditLocked}
-                    >
-                      Save Draft
-                    </button>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handleMarkNeedsMorePhotos}
-                      disabled={isEditLocked}
-                    >
-                      Needs More Photos
-                    </button>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={handleSubmitForApproval}
-                      disabled={isEditLocked || selectedClaim.status !== 'In Review'}
-                    >
-                      Submit for Approval
-                    </button>
-                  </div>
-
-                  <div className="agent-senior-panel">
-                    <div className="agent-section__header">
-                      <h3>Senior adjuster (simulated)</h3>
-                      <span className="agent-status agent-status--pending-approval">{selectedClaim.status}</span>
-                    </div>
-
-                    <label className="agent-senior-panel__check">
-                      <input
-                        type="checkbox"
-                        checked={seniorAdjusterReviewed}
-                        onChange={(event) => handleSeniorReviewToggle(event.target.checked)}
-                        disabled={isSeniorPanelLocked || selectedClaim.status !== 'Pending Approval'}
-                      />
-                      <span>Reviewed assessment and estimate</span>
-                    </label>
-
-                    <label className="agent-field">
-                      <span>Optional note</span>
-                      <textarea
-                        className="agent-textarea"
-                        rows={3}
-                        value={seniorAdjusterNote}
-                        onChange={(event) => setSeniorAdjusterNote(event.target.value)}
-                        placeholder="Add a note before final authorization"
-                        disabled={isSeniorPanelLocked || selectedClaim.status !== 'Pending Approval'}
-                      />
-                    </label>
-
-                    <div className="agent-actions">
-                      <button
-                        type="button"
-                        className="button button--ghost"
-                        onClick={handleSaveSeniorNote}
-                        disabled={isSeniorPanelLocked || selectedClaim.status !== 'Pending Approval'}
-                      >
-                        Save review note
-                      </button>
-                      <button
-                        type="button"
-                        className="button button--primary"
-                        onClick={handleApprove}
-                        disabled={
-                          isSeniorPanelLocked || selectedClaim.status !== 'Pending Approval' || !seniorAdjusterReviewed
-                        }
-                      >
-                        Approve & Authorize Repairs
-                      </button>
-                    </div>
-
-                    {selectedClaim.seniorApproval?.approvedAt && (
-                      <p className="muted">Approved at: {formatSubmittedAt(selectedClaim.seniorApproval.approvedAt)}</p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="agent-section">
+                <div className="agent-card">
                   <h2>Activity Timeline</h2>
-                  {selectedClaim.events.length === 0 ? (
-                    <p className="muted">No activity recorded yet.</p>
-                  ) : (
-                    <div className="agent-timeline">
-                      {[...selectedClaim.events]
-                        .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
-                        .map((event) => (
-                          <div key={event.id} className="agent-timeline__item">
-                            <div className="agent-timeline__row">
-                              <span className="agent-timeline__type">{event.type}</span>
-                              <span className="agent-timeline__at">{formatSubmittedAt(event.at)}</span>
-                            </div>
-                            <p className="agent-timeline__message">{event.message}</p>
-                          </div>
-                        ))}
-                    </div>
-                  )}
+                  <div className="agent-timeline">
+                    {[...selectedClaim.events]
+                      .sort((left, right) => new Date(right.at).getTime() - new Date(left.at).getTime())
+                      .map((event) => (
+                        <article key={event.id} className="agent-timeline__item">
+                          <p>
+                            <strong>{event.type}</strong>
+                          </p>
+                          <p>{event.message}</p>
+                          <p className="muted">{formatDateTime(event.at)}</p>
+                        </article>
+                      ))}
+                  </div>
                 </div>
               </>
             )}
           </section>
-        </div>
+        </section>
       </div>
     </div>
   )

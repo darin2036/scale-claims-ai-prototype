@@ -31,16 +31,85 @@ export interface AgentEstimateLineItem {
   amount: number
 }
 
+export type AgentCaseNextStep = 'Tow' | 'Repair' | 'Inspection'
+export type AgentCaseDecision = 'Authorize' | 'Needs More Photos' | 'Escalate'
+
+export interface AgentComparableClaimSnapshot {
+  id: string
+  vehicleMake: string
+  vehicleModel: string
+  severity: 'low' | 'medium' | 'high'
+  damageAreas: string[]
+  finalRepairCost: number
+  repairDurationDays: number
+  shortDescription: string
+  score: number
+}
+
+export interface AgentAICaseFile {
+  createdAt: string
+  damageSummary: {
+    impactedAreas: string[]
+    photoCount: number
+    drivable: boolean | null
+    hasOtherParty: boolean | null
+  }
+  severity: {
+    value: Severity
+    confidence: number
+    explanation: string
+  }
+  nextStep: {
+    value: AgentCaseNextStep
+    confidence: number
+    explanation: string
+  }
+  estimate: {
+    costBand: { min: number; max: number }
+    lineItems: AgentEstimateLineItem[]
+    total: number
+    confidence: number
+    explanation: string
+  }
+  duration: {
+    minDays: number
+    maxDays: number
+    confidence: number
+    explanation: string
+  }
+  similarClaims: {
+    matches: AgentComparableClaimSnapshot[]
+    typicalCostRange: { min: number; max: number } | null
+  }
+  signals: AgentSignal[]
+  finalRecommendation: {
+    decision: AgentCaseDecision
+    confidence: number
+    explanation: string
+  }
+}
+
 export interface AgentDecision {
   severity?: Severity
   recommendedNextStep?: RecommendedNextStep
+  caseFileNextStep?: AgentCaseNextStep
   estimatedRepairCost?: number | null
+  predictedDurationDaysMin?: number
+  predictedDurationDaysMax?: number
+  decisionChoice?: AgentCaseDecision
+  decisionConfirmedAt?: string
+  acceptedAISuggestedLineItems?: boolean
   lineItems?: AgentEstimateLineItem[]
   overrideReasons?: {
     severity?: string
+    nextStep?: string
     recommendedNextStep?: string
     estimatedRepairCost?: string
+    durationRange?: string
     finalEstimateVsTotal?: string
+    predictedDuration?: string
+    lineItems?: string
+    notes?: string
   }
 }
 
@@ -49,6 +118,52 @@ export interface AgentSeniorApproval {
   note?: string
   reviewedAt?: string
   approvedAt?: string
+}
+
+export type AgentOverlayVerdict = 'Correct' | 'Incorrect'
+
+export interface AgentOverlayRegion {
+  id: string
+  photoId: string
+  x: number
+  y: number
+  width: number
+  height: number
+  label: string
+  confidence: number
+  source: 'ai' | 'agent'
+  verdict?: AgentOverlayVerdict
+}
+
+export type AgentSignalSeverity = 'Info' | 'Warning'
+
+export type AgentSignalType =
+  | 'missing_wide_shot'
+  | 'very_low_confidence'
+  | 'severity_notes_mismatch'
+  | 'duplicate_photos'
+
+export interface AgentSignal {
+  id: AgentSignalType
+  severity: AgentSignalSeverity
+  title: string
+  recommendedAction: string
+}
+
+export type AgentSignalActionType = 'request_more_photos' | 'escalate'
+
+export interface AgentSignalActionRecord {
+  id: string
+  at: string
+  signalId: AgentSignalType
+  action: AgentSignalActionType
+}
+
+export interface AgentDurationPrediction {
+  predictedDurationDaysMin: number
+  predictedDurationDaysMax: number
+  confidence: number
+  explanation: string
 }
 
 export interface AgentClaim {
@@ -84,6 +199,13 @@ export interface AgentClaim {
   }
   photos: AgentPhoto[]
   aiAssessment?: AIAssessment
+  aiCaseFile?: AgentAICaseFile
+  aiDurationPrediction?: AgentDurationPrediction
+  aiSuggestedLineItems?: AgentEstimateLineItem[]
+  overlayRegionsByPhoto?: Record<string, AgentOverlayRegion[]>
+  aiSignals?: AgentSignal[]
+  aiSignalActions?: AgentSignalActionRecord[]
+  aiSignalsEvaluatedAt?: string
   agentDecision?: AgentDecision
   seniorApproval?: AgentSeniorApproval
   agentNotes?: string
@@ -412,6 +534,13 @@ const normalizeImportedClaim = (value: Partial<AgentClaim>): AgentClaim | null =
     incident: value.incident,
     photos: Array.isArray(value.photos) ? value.photos : [],
     agentDecision: value.agentDecision,
+    aiCaseFile: value.aiCaseFile,
+    aiDurationPrediction: value.aiDurationPrediction,
+    aiSuggestedLineItems: value.aiSuggestedLineItems,
+    overlayRegionsByPhoto: value.overlayRegionsByPhoto,
+    aiSignals: value.aiSignals,
+    aiSignalActions: value.aiSignalActions,
+    aiSignalsEvaluatedAt: value.aiSignalsEvaluatedAt,
     openedAt: value.openedAt,
     aiAssessedAt: value.aiAssessedAt,
     draftSavedAt: value.draftSavedAt,
@@ -503,9 +632,201 @@ const normalizeSeniorApproval = (
   return undefined
 }
 
+const normalizeConfidenceValue = (value: number | undefined) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0
+  }
+  const normalized = value <= 1 ? value : value / 100
+  return Math.min(1, Math.max(0, normalized))
+}
+
+const normalizeCaseNextStep = (value: string | undefined): AgentCaseNextStep => {
+  if (value === 'Tow' || value === 'Repair' || value === 'Inspection') {
+    return value
+  }
+  return 'Inspection'
+}
+
+const normalizeCaseDecision = (value: string | undefined): AgentCaseDecision => {
+  if (value === 'Authorize' || value === 'Needs More Photos' || value === 'Escalate') {
+    return value
+  }
+  return 'Needs More Photos'
+}
+
+const normalizeAICaseFile = (caseFile: AgentClaim['aiCaseFile']): AgentClaim['aiCaseFile'] => {
+  if (!caseFile || typeof caseFile !== 'object') {
+    return undefined
+  }
+
+  const estimateLineItems = Array.isArray(caseFile.estimate?.lineItems)
+    ? caseFile.estimate.lineItems.map((lineItem, index) => ({
+        id: lineItem.id ?? `ai-line-${index + 1}`,
+        description: lineItem.description ?? '',
+        category:
+          lineItem.category === 'Parts' ||
+          lineItem.category === 'Labor' ||
+          lineItem.category === 'Paint' ||
+          lineItem.category === 'Misc'
+            ? lineItem.category
+            : 'Misc',
+        amount: Number.isFinite(lineItem.amount) ? Math.max(0, Math.round(lineItem.amount)) : 0,
+      }))
+    : []
+
+  const similarMatches = Array.isArray(caseFile.similarClaims?.matches)
+    ? caseFile.similarClaims.matches.map((match, index) => ({
+        id: match.id ?? `hist-${index + 1}`,
+        vehicleMake: match.vehicleMake ?? 'Unknown',
+        vehicleModel: match.vehicleModel ?? 'Vehicle',
+        severity:
+          match.severity === 'low' || match.severity === 'medium' || match.severity === 'high'
+            ? match.severity
+            : 'medium',
+        damageAreas: Array.isArray(match.damageAreas) ? match.damageAreas : [],
+        finalRepairCost: Number.isFinite(match.finalRepairCost) ? Math.max(0, Math.round(match.finalRepairCost)) : 0,
+        repairDurationDays: Number.isFinite(match.repairDurationDays)
+          ? Math.max(1, Math.round(match.repairDurationDays))
+          : 1,
+        shortDescription: match.shortDescription ?? '',
+        score: Number.isFinite(match.score) ? match.score : 0,
+      }))
+    : []
+  const similarCosts = similarMatches.map((match) => match.finalRepairCost).filter((value) => value > 0)
+
+  return {
+    createdAt: caseFile.createdAt ?? new Date().toISOString(),
+    damageSummary: {
+      impactedAreas: Array.isArray(caseFile.damageSummary?.impactedAreas)
+        ? caseFile.damageSummary.impactedAreas
+        : [],
+      photoCount: Number.isFinite(caseFile.damageSummary?.photoCount) ? Math.max(0, caseFile.damageSummary.photoCount) : 0,
+      drivable: typeof caseFile.damageSummary?.drivable === 'boolean' ? caseFile.damageSummary.drivable : null,
+      hasOtherParty:
+        typeof caseFile.damageSummary?.hasOtherParty === 'boolean'
+          ? caseFile.damageSummary.hasOtherParty
+          : null,
+    },
+    severity: {
+      value:
+        caseFile.severity?.value === 'Low' ||
+        caseFile.severity?.value === 'Medium' ||
+        caseFile.severity?.value === 'High'
+          ? caseFile.severity.value
+          : 'Medium',
+      confidence: normalizeConfidenceValue(caseFile.severity?.confidence),
+      explanation: caseFile.severity?.explanation ?? '',
+    },
+    nextStep: {
+      value: normalizeCaseNextStep(caseFile.nextStep?.value),
+      confidence: normalizeConfidenceValue(caseFile.nextStep?.confidence),
+      explanation: caseFile.nextStep?.explanation ?? '',
+    },
+    estimate: {
+      costBand: {
+        min: Number.isFinite(caseFile.estimate?.costBand?.min) ? Math.max(0, Math.round(caseFile.estimate.costBand.min)) : 0,
+        max: Number.isFinite(caseFile.estimate?.costBand?.max)
+          ? Math.max(
+              0,
+              Math.round(Math.max(caseFile.estimate.costBand.max, caseFile.estimate?.costBand?.min ?? 0)),
+            )
+          : 0,
+      },
+      lineItems: estimateLineItems,
+      total:
+        Number.isFinite(caseFile.estimate?.total)
+          ? Math.max(0, Math.round(caseFile.estimate.total))
+          : estimateLineItems.reduce((sum, item) => sum + item.amount, 0),
+      confidence: normalizeConfidenceValue(caseFile.estimate?.confidence),
+      explanation: caseFile.estimate?.explanation ?? '',
+    },
+    duration: {
+      minDays: Number.isFinite(caseFile.duration?.minDays) ? Math.max(0, Math.round(caseFile.duration.minDays)) : 0,
+      maxDays: Number.isFinite(caseFile.duration?.maxDays)
+        ? Math.max(0, Math.round(Math.max(caseFile.duration.maxDays, caseFile.duration?.minDays ?? 0)))
+        : 0,
+      confidence: normalizeConfidenceValue(caseFile.duration?.confidence),
+      explanation: caseFile.duration?.explanation ?? '',
+    },
+    similarClaims: {
+      matches: similarMatches,
+      typicalCostRange: caseFile.similarClaims?.typicalCostRange
+        ? {
+            min: Number.isFinite(caseFile.similarClaims.typicalCostRange.min)
+              ? Math.max(0, Math.round(caseFile.similarClaims.typicalCostRange.min))
+              : similarCosts.length > 0
+                ? Math.min(...similarCosts)
+                : 0,
+            max: Number.isFinite(caseFile.similarClaims.typicalCostRange.max)
+              ? Math.max(0, Math.round(caseFile.similarClaims.typicalCostRange.max))
+              : similarCosts.length > 0
+                ? Math.max(...similarCosts)
+                : 0,
+          }
+        : similarCosts.length > 0
+          ? {
+              min: Math.min(...similarCosts),
+              max: Math.max(...similarCosts),
+            }
+          : null,
+    },
+    signals: Array.isArray(caseFile.signals) ? caseFile.signals : [],
+    finalRecommendation: {
+      decision: normalizeCaseDecision(caseFile.finalRecommendation?.decision),
+      confidence: normalizeConfidenceValue(caseFile.finalRecommendation?.confidence),
+      explanation: caseFile.finalRecommendation?.explanation ?? '',
+    },
+  }
+}
+
 const normalizeStoredClaim = (claim: AgentClaim): AgentClaim => {
   const status = normalizeClaimStatus(claim.status)
   const seniorApproval = normalizeSeniorApproval(claim, status)
+  const normalizedAICaseFile = normalizeAICaseFile(claim.aiCaseFile)
+  const normalizedDurationPrediction =
+    claim.aiDurationPrediction &&
+    Number.isFinite(claim.aiDurationPrediction.predictedDurationDaysMin) &&
+    Number.isFinite(claim.aiDurationPrediction.predictedDurationDaysMax)
+      ? {
+          predictedDurationDaysMin: Math.max(0, Math.round(claim.aiDurationPrediction.predictedDurationDaysMin)),
+          predictedDurationDaysMax: Math.max(
+            0,
+            Math.round(
+              Math.max(
+                claim.aiDurationPrediction.predictedDurationDaysMin,
+                claim.aiDurationPrediction.predictedDurationDaysMax,
+              ),
+            ),
+          ),
+          confidence: Number.isFinite(claim.aiDurationPrediction.confidence)
+            ? claim.aiDurationPrediction.confidence
+            : 0,
+          explanation: claim.aiDurationPrediction.explanation ?? '',
+        }
+      : undefined
+  const normalizedOverlayRegionsByPhoto =
+    claim.overlayRegionsByPhoto && typeof claim.overlayRegionsByPhoto === 'object'
+      ? Object.fromEntries(
+          Object.entries(claim.overlayRegionsByPhoto).map(([photoId, regions]) => [
+            photoId,
+            Array.isArray(regions)
+              ? regions
+                  .filter((region) => Boolean(region && typeof region === 'object'))
+                  .map((region) => ({
+                    ...region,
+                    photoId: region.photoId ?? photoId,
+                    label: region.label ?? 'Damage region',
+                    confidence: Number.isFinite(region.confidence) ? region.confidence : 0,
+                    source: (region.source === 'agent' ? 'agent' : 'ai') as AgentOverlayRegion['source'],
+                    verdict:
+                      region.verdict === 'Correct' || region.verdict === 'Incorrect'
+                        ? region.verdict
+                        : undefined,
+                  }))
+              : [],
+          ]),
+        )
+      : {}
 
   return {
     ...claim,
@@ -515,15 +836,30 @@ const normalizeStoredClaim = (claim: AgentClaim): AgentClaim => {
       photosReceived: false,
       checklist: [],
     },
+    aiCaseFile: normalizedAICaseFile,
+    aiDurationPrediction: normalizedDurationPrediction,
+    overlayRegionsByPhoto: normalizedOverlayRegionsByPhoto,
+    aiSignals: Array.isArray(claim.aiSignals) ? claim.aiSignals : [],
+    aiSignalActions: Array.isArray(claim.aiSignalActions) ? claim.aiSignalActions : [],
+    aiSignalsEvaluatedAt: claim.aiSignalsEvaluatedAt,
     agentDecision: claim.agentDecision
       ? {
           ...claim.agentDecision,
+          caseFileNextStep: claim.agentDecision.caseFileNextStep
+            ? normalizeCaseNextStep(claim.agentDecision.caseFileNextStep)
+            : undefined,
+          decisionChoice: claim.agentDecision.decisionChoice
+            ? normalizeCaseDecision(claim.agentDecision.decisionChoice)
+            : undefined,
+          acceptedAISuggestedLineItems: Boolean(claim.agentDecision.acceptedAISuggestedLineItems),
           lineItems: Array.isArray(claim.agentDecision.lineItems) ? claim.agentDecision.lineItems : [],
         }
       : {
           estimatedRepairCost: (claim as AgentClaim & { estimatedRepairCost?: number | null }).estimatedRepairCost ?? null,
+          acceptedAISuggestedLineItems: false,
           lineItems: [],
         },
+    aiSuggestedLineItems: Array.isArray(claim.aiSuggestedLineItems) ? claim.aiSuggestedLineItems : [],
     openedAt: claim.openedAt,
     aiAssessedAt: claim.aiAssessedAt,
     draftSavedAt: claim.draftSavedAt,
