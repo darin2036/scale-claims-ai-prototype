@@ -1,4 +1,6 @@
 import type { Vehicle } from '../../server/fakeDb'
+import type { TowStatus } from '../../server/nextStepsApi'
+import type { OtherPartyDetails } from '../../types/claim'
 
 export const AGENT_MOST_RECENT_SUBMISSION_KEY = 'claims-agent-most-recent-submission-v1'
 export const AGENT_CLAIM_OVERRIDES_KEY = 'claims-agent-claim-overrides-v1'
@@ -25,6 +27,14 @@ export interface AgentClaimRecord {
     deductible: number
     rentalCoverage: boolean
   }
+  incident?: {
+    incidentDescription?: string
+    incidentNarrationText?: string
+    hasOtherParty: boolean | null
+    otherPartyDetails?: OtherPartyDetails | null
+    towRequested?: boolean
+    towStatus?: TowStatus
+  }
   photos: AgentPhoto[]
   source: 'customer_flow' | 'mock'
 }
@@ -43,6 +53,7 @@ interface PersistCustomerSubmissionArgs {
   drivable: boolean | null
   hasOtherParty: boolean | null
   policy?: AgentClaimRecord['policy']
+  incident?: AgentClaimRecord['incident']
   damagePhotos: File[]
   vehiclePhoto: File | null
 }
@@ -141,6 +152,7 @@ export const persistMostRecentSubmissionFromCustomerFlow = async (
     drivable: args.drivable,
     hasOtherParty: args.hasOtherParty,
     policy: args.policy,
+    incident: args.incident,
     photos,
     source: 'customer_flow',
   }

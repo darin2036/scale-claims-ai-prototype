@@ -760,6 +760,14 @@ export default function App() {
               rentalCoverage: policyHolder.policy.rentalCoverage,
             }
           : undefined,
+        incident: {
+          incidentDescription: claimPayload.incidentDescription,
+          incidentNarrationText: claimPayload.incidentNarrationText,
+          hasOtherParty: claimPayload.hasOtherParty ?? null,
+          otherPartyDetails: claimPayload.otherPartyDetails,
+          towRequested: claimPayload.tow?.requested,
+          towStatus: claimPayload.tow?.status,
+        },
         damagePhotos: photos.damagePhoto,
         vehiclePhoto: photos.vehiclePhoto,
       })
