@@ -98,6 +98,7 @@ export interface AgentDecision {
   predictedDurationDaysMax?: number
   decisionChoice?: AgentCaseDecision
   decisionConfirmedAt?: string
+  decisionNote?: string
   acceptedAISuggestedLineItems?: boolean
   lineItems?: AgentEstimateLineItem[]
   overrideReasons?: {

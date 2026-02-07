@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import fenderbenderLogo from '../assets/fenderbender-logo.png'
 import type { Severity } from '../lib/mockAI'
 import { AI_CASE_PIPELINE_STEPS, generateAICaseFileBundle } from '../agent/aiCaseFile'
+import { generateMockOverlayRegions } from '../agent/overlayRegions'
 import {
   appendClaimEvent,
   loadAgentClaims,
@@ -13,6 +14,7 @@ import {
   type AgentCaseNextStep,
   type AgentClaim,
   type AgentClaimStatus,
+  type AgentComparableClaimSnapshot,
 } from '../agent/store'
 import './AgentReview.css'
 
@@ -23,6 +25,7 @@ const REQUESTED_SHOT_CHECKLIST = [
   'Opposite-side angle for context',
   'Photo in brighter lighting',
 ]
+const AI_PIPELINE_STEP_DELAY_MS = 950
 
 const STATUS_FILTERS: Array<'All' | AgentClaimStatus> = [
   'All',
@@ -32,11 +35,13 @@ const STATUS_FILTERS: Array<'All' | AgentClaimStatus> = [
   'Pending Approval',
   'Authorized',
 ]
+const ASSIGNEE_FILTER_ALL = 'All'
+const ASSIGNEE_FILTER_UNASSIGNED = 'Unassigned'
 
 const DECISION_OPTIONS: Array<{ value: AgentCaseDecision; label: string }> = [
-  { value: 'Authorize', label: 'Authorize Repairs (simulated)' },
+  { value: 'Authorize', label: 'Authorize Repairs (recommended)' },
   { value: 'Needs More Photos', label: 'Request More Photos' },
-  { value: 'Escalate', label: 'Escalate to Senior Adjuster (simulated)' },
+  { value: 'Escalate', label: 'Escalate to Senior Adjuster (recommended)' },
 ]
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -65,6 +70,17 @@ const parseNonNegativeInteger = (value: string): number | null => {
     return null
   }
   return Math.max(0, Math.round(parsed))
+}
+
+const parsePercentToUnit = (value: string): number | null => {
+  if (!value.trim()) {
+    return null
+  }
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+  return Math.min(1, Math.max(0, parsed / 100))
 }
 
 const formatDurationMs = (durationMs: number) => {
@@ -115,12 +131,37 @@ export default function AgentReview() {
   const [selectedClaimId, setSelectedClaimId] = useState<string>(() => loadAgentClaims()[0]?.id ?? '')
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'All' | AgentClaimStatus>('All')
+  const [assigneeFilter, setAssigneeFilter] = useState<string>(ASSIGNEE_FILTER_ALL)
   const [sortOrder, setSortOrder] = useState<'updated_desc' | 'updated_asc'>('updated_desc')
 
   const [pipeline, setPipeline] = useState<{ claimId: string; stepIndex: number } | null>(null)
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null)
   const [reviewedConfirmation, setReviewedConfirmation] = useState(false)
   const [selectedDecision, setSelectedDecision] = useState<AgentCaseDecision>('Needs More Photos')
+  const [decisionReason, setDecisionReason] = useState('')
+  const [selectedSimilarClaim, setSelectedSimilarClaim] = useState<AgentComparableClaimSnapshot | null>(null)
+  const [isEditingCaseFile, setIsEditingCaseFile] = useState(false)
+  const [caseFileEditDraft, setCaseFileEditDraft] = useState<{
+    impactedAreas: string
+    severityConfidence: string
+    nextStep: AgentCaseNextStep | ''
+    nextStepConfidence: string
+    estimateTotal: string
+    durationMin: string
+    durationMax: string
+    finalRecommendation: AgentCaseDecision | ''
+    recommendationExplanation: string
+  }>({
+    impactedAreas: '',
+    severityConfidence: '',
+    nextStep: '',
+    nextStepConfidence: '',
+    estimateTotal: '',
+    durationMin: '',
+    durationMax: '',
+    finalRecommendation: '',
+    recommendationExplanation: '',
+  })
 
   const [reviewSeverity, setReviewSeverity] = useState<Severity | ''>('')
   const [reviewNextStep, setReviewNextStep] = useState<AgentCaseNextStep | ''>('')
@@ -142,10 +183,33 @@ export default function AgentReview() {
     setClaims(loadAgentClaims())
   }
 
+  const assigneeFilterOptions = useMemo(() => {
+    const names = [...new Set(claims.map((claim) => claim.assignee?.trim()).filter(Boolean) as string[])].sort((a, b) =>
+      a.localeCompare(b),
+    )
+    return [ASSIGNEE_FILTER_ALL, ASSIGNEE_FILTER_UNASSIGNED, ...names]
+  }, [claims])
+
+  useEffect(() => {
+    if (!assigneeFilterOptions.includes(assigneeFilter)) {
+      setAssigneeFilter(ASSIGNEE_FILTER_ALL)
+    }
+  }, [assigneeFilter, assigneeFilterOptions])
+
   const queueClaims = useMemo(() => {
     const search = searchQuery.trim().toLowerCase()
     const filtered = claims.filter((claim) => {
       if (statusFilter !== 'All' && claim.status !== statusFilter) {
+        return false
+      }
+      if (assigneeFilter === ASSIGNEE_FILTER_UNASSIGNED && claim.assignee) {
+        return false
+      }
+      if (
+        assigneeFilter !== ASSIGNEE_FILTER_ALL &&
+        assigneeFilter !== ASSIGNEE_FILTER_UNASSIGNED &&
+        (claim.assignee ?? '') !== assigneeFilter
+      ) {
         return false
       }
       if (!search) {
@@ -170,7 +234,7 @@ export default function AgentReview() {
       const rightMs = new Date(right.lastUpdatedAt).getTime()
       return sortOrder === 'updated_asc' ? leftMs - rightMs : rightMs - leftMs
     })
-  }, [claims, searchQuery, sortOrder, statusFilter])
+  }, [assigneeFilter, claims, searchQuery, sortOrder, statusFilter])
 
   useEffect(() => {
     if (queueClaims.length === 0) {
@@ -186,6 +250,15 @@ export default function AgentReview() {
   const selectedCaseFile = selectedClaim?.aiCaseFile ?? null
   const selectedPhoto =
     selectedClaim?.photos.find((photo) => photo.id === activePhotoId) ?? selectedClaim?.photos[0] ?? null
+  const selectedPhotoOverlays =
+    selectedClaim && selectedPhoto ? selectedClaim.overlayRegionsByPhoto?.[selectedPhoto.id] ?? [] : []
+  const highestSimilarMatchScore = selectedCaseFile
+    ? Math.max(1, ...selectedCaseFile.similarClaims.matches.map((match) => match.score))
+    : 1
+  const selectedSimilarClaimScorePercent =
+    selectedSimilarClaim && highestSimilarMatchScore > 0
+      ? Math.round((selectedSimilarClaim.score / highestSimilarMatchScore) * 100)
+      : 0
 
   useEffect(() => {
     if (!selectedClaim) {
@@ -209,6 +282,41 @@ export default function AgentReview() {
     refreshClaims()
   }, [selectedClaim?.id])
 
+  useEffect(() => {
+    setSelectedSimilarClaim(null)
+  }, [selectedClaim?.id])
+
+  useEffect(() => {
+    if (!selectedCaseFile) {
+      setIsEditingCaseFile(false)
+      setCaseFileEditDraft({
+        impactedAreas: '',
+        severityConfidence: '',
+        nextStep: '',
+        nextStepConfidence: '',
+        estimateTotal: '',
+        durationMin: '',
+        durationMax: '',
+        finalRecommendation: '',
+        recommendationExplanation: '',
+      })
+      return
+    }
+
+    setIsEditingCaseFile(false)
+    setCaseFileEditDraft({
+      impactedAreas: selectedCaseFile.damageSummary.impactedAreas.join(', '),
+      severityConfidence: String(Math.round(selectedCaseFile.severity.confidence * 100)),
+      nextStep: selectedCaseFile.nextStep.value,
+      nextStepConfidence: String(Math.round(selectedCaseFile.nextStep.confidence * 100)),
+      estimateTotal: String(selectedCaseFile.estimate.total),
+      durationMin: String(selectedCaseFile.duration.minDays),
+      durationMax: String(selectedCaseFile.duration.maxDays),
+      finalRecommendation: selectedCaseFile.finalRecommendation.decision,
+      recommendationExplanation: selectedCaseFile.finalRecommendation.explanation,
+    })
+  }, [selectedCaseFile?.createdAt, selectedClaim?.id])
+
   const resetReviewStateFromClaim = (claim: AgentClaim | null) => {
     if (!claim || !claim.aiCaseFile) {
       setReviewSeverity('')
@@ -220,6 +328,7 @@ export default function AgentReview() {
       setReasonForChange({})
       setReviewedConfirmation(false)
       setSelectedDecision('Needs More Photos')
+      setDecisionReason('')
       return
     }
 
@@ -243,6 +352,7 @@ export default function AgentReview() {
     })
     setReviewedConfirmation(false)
     setSelectedDecision(decision?.decisionChoice ?? defaultDecision)
+    setDecisionReason(decision?.decisionNote ?? '')
   }
 
   useEffect(() => {
@@ -357,6 +467,32 @@ export default function AgentReview() {
       ? 'Needs More Photos'
       : selectedCaseFile.finalRecommendation.decision
     : 'Needs More Photos'
+  const reviewInputsComplete =
+    Boolean(reviewSeverity) &&
+    Boolean(reviewNextStep) &&
+    parsedEstimateTotal !== null &&
+    durationIsValid &&
+    parsedDurationMin !== null &&
+    parsedDurationMax !== null &&
+    !hasMissingChangeReason
+  const decisionDiffersFromAI = Boolean(selectedCaseFile && selectedDecision !== defaultDecision)
+  const decisionRequiresReason = decisionDiffersFromAI
+  const hasDecisionReason = Boolean(decisionReason.trim())
+  const decisionLocked = Boolean(selectedClaim?.agentDecision?.decisionConfirmedAt)
+  const decisionReadyToApply = Boolean(
+    selectedCaseFile &&
+      reviewInputsComplete &&
+      reviewedConfirmation &&
+      (!decisionRequiresReason || hasDecisionReason) &&
+      !decisionLocked,
+  )
+  const decisionOutcomeStatus = decisionToStatus(selectedDecision)
+  const decisionOutcomeDetail =
+    selectedDecision === 'Authorize'
+      ? 'Claim will move to Authorized and lock edits.'
+      : selectedDecision === 'Needs More Photos'
+        ? 'Claim will move to Needs More Photos and include a suggested photo checklist.'
+        : 'Claim will move to Pending Approval for senior adjuster review.'
 
   const assignSelectedClaimToMe = () => {
     if (!selectedClaim || selectedClaim.readOnlyImported || selectedClaim.assignee === CURRENT_AGENT_NAME) {
@@ -378,6 +514,10 @@ export default function AgentReview() {
       setBanner({ tone: 'info', message: 'Imported customer snapshot is read-only in agent mode.' })
       return
     }
+    if (selectedClaim.aiCaseFile) {
+      setBanner({ tone: 'info', message: 'AI Case File has already been generated for this claim.' })
+      return
+    }
 
     setBanner(null)
     setPipeline({ claimId: selectedClaim.id, stepIndex: 0 })
@@ -385,7 +525,7 @@ export default function AgentReview() {
     try {
       for (let i = 0; i < AI_CASE_PIPELINE_STEPS.length; i += 1) {
         setPipeline({ claimId: selectedClaim.id, stepIndex: i })
-        await sleep(180)
+        await sleep(AI_PIPELINE_STEP_DELAY_MS)
       }
 
       const bundle = await generateAICaseFileBundle(selectedClaim)
@@ -396,6 +536,11 @@ export default function AgentReview() {
         status: selectedClaim.status === 'New' ? 'In Review' : selectedClaim.status,
         aiCaseFile: bundle.caseFile,
         aiAssessment: bundle.assessment,
+        overlayRegionsByPhoto: generateMockOverlayRegions({
+          claimId: selectedClaim.id,
+          photos: selectedClaim.photos,
+          aiAssessment: bundle.assessment,
+        }),
         aiDurationPrediction: bundle.durationPrediction,
         aiSuggestedLineItems: bundle.suggestedLineItems,
         aiSignals: bundle.signals,
@@ -413,10 +558,14 @@ export default function AgentReview() {
         },
       })
 
-      appendClaimEvent(selectedClaim.id, {
-        type: 'ai_case_file_generated',
-        message: `Generated AI case file. Recommendation: ${bundle.caseFile.finalRecommendation.decision}.`,
-      })
+    appendClaimEvent(selectedClaim.id, {
+      type: 'ai_case_file_generated',
+      message: `Generated AI case file. Recommendation: ${bundle.caseFile.finalRecommendation.decision}.`,
+    })
+    appendClaimEvent(selectedClaim.id, {
+      type: 'ai_overlays_generated',
+      message: 'Generated AI-detected damage overlays on uploaded photos.',
+    })
       if (lowConfidenceRecommendation) {
         appendClaimEvent(selectedClaim.id, {
           type: 'low_confidence_guardrail',
@@ -431,6 +580,82 @@ export default function AgentReview() {
     } finally {
       setPipeline(null)
     }
+  }
+
+  const handleSaveCaseFileEdits = () => {
+    if (!selectedClaim || !selectedCaseFile) {
+      setBanner({ tone: 'info', message: 'Generate AI Case File before editing its fields.' })
+      return
+    }
+    if (selectedClaim.readOnlyImported || selectedClaim.status === 'Authorized') {
+      setBanner({ tone: 'info', message: 'This claim is read-only and cannot be edited.' })
+      return
+    }
+
+    const impactedAreas = caseFileEditDraft.impactedAreas
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const severityConfidence = parsePercentToUnit(caseFileEditDraft.severityConfidence)
+    const nextStepConfidence = parsePercentToUnit(caseFileEditDraft.nextStepConfidence)
+    const estimateTotal = parseNonNegativeInteger(caseFileEditDraft.estimateTotal)
+    const durationMin = parseNonNegativeInteger(caseFileEditDraft.durationMin)
+    const durationMax = parseNonNegativeInteger(caseFileEditDraft.durationMax)
+
+    if (
+      impactedAreas.length === 0 ||
+      !caseFileEditDraft.nextStep ||
+      !caseFileEditDraft.finalRecommendation ||
+      severityConfidence === null ||
+      nextStepConfidence === null ||
+      estimateTotal === null ||
+      durationMin === null ||
+      durationMax === null ||
+      durationMax < durationMin
+    ) {
+      setBanner({ tone: 'info', message: 'Complete all editable AI Case File fields with valid values.' })
+      return
+    }
+
+    const updatedCaseFile: AgentAICaseFile = {
+      ...selectedCaseFile,
+      damageSummary: {
+        ...selectedCaseFile.damageSummary,
+        impactedAreas,
+      },
+      severity: {
+        ...selectedCaseFile.severity,
+        confidence: severityConfidence,
+      },
+      nextStep: {
+        ...selectedCaseFile.nextStep,
+        value: caseFileEditDraft.nextStep,
+        confidence: nextStepConfidence,
+      },
+      estimate: {
+        ...selectedCaseFile.estimate,
+        total: estimateTotal,
+      },
+      duration: {
+        ...selectedCaseFile.duration,
+        minDays: durationMin,
+        maxDays: durationMax,
+      },
+      finalRecommendation: {
+        ...selectedCaseFile.finalRecommendation,
+        decision: caseFileEditDraft.finalRecommendation,
+        explanation: caseFileEditDraft.recommendationExplanation.trim() || selectedCaseFile.finalRecommendation.explanation,
+      },
+    }
+
+    updateClaim(selectedClaim.id, { aiCaseFile: updatedCaseFile })
+    appendClaimEvent(selectedClaim.id, {
+      type: 'ai_case_file_edited',
+      message: 'Agent edited AI Case File fields after initial generation.',
+    })
+    refreshClaims()
+    setIsEditingCaseFile(false)
+    setBanner({ tone: 'success', message: 'AI Case File fields updated.' })
   }
 
   const persistHumanReview = (eventType: 'review_saved' | 'review_applied_before_decision') => {
@@ -511,9 +736,13 @@ export default function AgentReview() {
     setBanner({ tone: 'success', message: 'Human review saved.' })
   }
 
-  const handleDecisionAction = (decision: AgentCaseDecision) => {
+  const handleDecisionAction = () => {
     if (!selectedClaim || !selectedCaseFile) {
       setBanner({ tone: 'info', message: 'Generate AI Case File before taking a decision.' })
+      return
+    }
+    if (selectedClaim.agentDecision?.decisionConfirmedAt) {
+      setBanner({ tone: 'info', message: 'Decision is already finalized for this claim and cannot be changed.' })
       return
     }
     if (selectedClaim.readOnlyImported) {
@@ -524,6 +753,17 @@ export default function AgentReview() {
       setBanner({ tone: 'info', message: 'Confirm that you reviewed the AI Case File and changes.' })
       return
     }
+    if (!reviewInputsComplete) {
+      setBanner({ tone: 'info', message: 'Complete Human Review and required reasons before applying a decision.' })
+      return
+    }
+    if (decisionRequiresReason && !hasDecisionReason) {
+      setBanner({
+        tone: 'info',
+        message: 'Provide a rationale when choosing a decision different from the AI recommendation.',
+      })
+      return
+    }
 
     const persisted = persistHumanReview('review_applied_before_decision')
     if (!persisted) {
@@ -531,6 +771,7 @@ export default function AgentReview() {
     }
 
     const now = new Date().toISOString()
+    const decision = selectedDecision
     const nextStatus = decisionToStatus(decision)
 
     updateClaim(selectedClaim.id, {
@@ -551,17 +792,19 @@ export default function AgentReview() {
         ...(selectedClaim.agentDecision ?? {}),
         decisionChoice: decision,
         decisionConfirmedAt: now,
+        decisionNote: decisionReason.trim() || undefined,
       },
     })
 
     appendClaimEvent(selectedClaim.id, {
       type: 'decision_applied',
-      message: `Decision applied: ${humanDecisionLabel(decision)}. Status set to ${nextStatus}.`,
+      message: `Decision applied: ${humanDecisionLabel(decision)}. Status set to ${nextStatus}.${decisionReason.trim() ? ` Rationale: ${decisionReason.trim()}` : ''}`,
     })
 
     refreshClaims()
     setSelectedDecision(decision)
     setReviewedConfirmation(false)
+    setDecisionReason('')
     setBanner({ tone: 'success', message: `Decision applied: ${humanDecisionLabel(decision)}.` })
   }
 
@@ -571,6 +814,7 @@ export default function AgentReview() {
     setSelectedClaimId(nextClaims[0]?.id ?? '')
     setSearchQuery('')
     setStatusFilter('All')
+    setAssigneeFilter(ASSIGNEE_FILTER_ALL)
     setSortOrder('updated_desc')
     setPipeline(null)
     setBanner({ tone: 'info', message: 'Agent demo queue reset.' })
@@ -696,6 +940,20 @@ export default function AgentReview() {
                   <option value="updated_asc">Last updated (oldest)</option>
                 </select>
               </label>
+              <label className="agent-field">
+                <span>Assignee</span>
+                <select
+                  className="agent-input"
+                  value={assigneeFilter}
+                  onChange={(event) => setAssigneeFilter(event.target.value)}
+                >
+                  {assigneeFilterOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
 
             <div className="agent-queue__list">
@@ -728,7 +986,10 @@ export default function AgentReview() {
               <>
                 <div className="agent-card">
                   <div className="agent-section__header">
-                    <h2>Claim Summary</h2>
+                    <div className="agent-summary-status">
+                      <h2>Claim Summary</h2>
+                      <span className={statusClassName(selectedClaim.status)}>{selectedClaim.status}</span>
+                    </div>
                     <div className="agent-actions">
                       <button
                         type="button"
@@ -777,8 +1038,38 @@ export default function AgentReview() {
                   {selectedClaim.photos.length > 0 && (
                     <>
                       <div className="agent-photo-viewer">
-                        {selectedPhoto && <img src={selectedPhoto.url} alt={selectedPhoto.name} />}
+                        {selectedPhoto && (
+                          <div className="agent-photo-canvas">
+                            <img src={selectedPhoto.url} alt={selectedPhoto.name} />
+                            {selectedPhotoOverlays.map((overlay) => (
+                              <div
+                                key={overlay.id}
+                                className="agent-photo-overlay"
+                                style={{
+                                  left: `${overlay.x * 100}%`,
+                                  top: `${overlay.y * 100}%`,
+                                  width: `${overlay.width * 100}%`,
+                                  height: `${overlay.height * 100}%`,
+                                }}
+                                title={`${overlay.label} (${overlay.confidence}%)`}
+                              >
+                                <span className="agent-photo-overlay__label">
+                                  {overlay.label} ({overlay.confidence}%)
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
+                      {selectedCaseFile && selectedPhotoOverlays.length === 0 && (
+                        <p className="muted">No AI damage overlays available yet for this photo.</p>
+                      )}
+                      {selectedPhotoOverlays.length > 0 && (
+                        <p className="muted">
+                          AI detected {selectedPhotoOverlays.length} damage region
+                          {selectedPhotoOverlays.length === 1 ? '' : 's'} on this photo.
+                        </p>
+                      )}
                       <div className="agent-photo-strip">
                         {selectedClaim.photos.map((photo) => (
                           <button
@@ -798,19 +1089,48 @@ export default function AgentReview() {
                 <div className="agent-card">
                   <div className="agent-section__header">
                     <h2>AI Case File</h2>
-                    <button
-                      type="button"
-                      className="button button--primary"
-                      onClick={handleGenerateCaseFile}
-                      disabled={Boolean(pipeline && pipeline.claimId === selectedClaim.id) || selectedClaim.readOnlyImported}
-                    >
-                      {selectedCaseFile ? 'Regenerate AI Case File' : 'Generate AI Case File'}
-                    </button>
+                    <div className="agent-actions">
+                      {selectedCaseFile && (
+                        <button
+                          type="button"
+                          className="button button--ghost"
+                          onClick={() => setIsEditingCaseFile((current) => !current)}
+                          disabled={isReadOnly}
+                        >
+                          {isEditingCaseFile ? 'Cancel Edit' : 'Edit AI Fields'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="button button--primary"
+                        onClick={handleGenerateCaseFile}
+                        disabled={
+                          Boolean(pipeline && pipeline.claimId === selectedClaim.id) ||
+                          selectedClaim.readOnlyImported ||
+                          Boolean(selectedClaim.aiCaseFile)
+                        }
+                      >
+                        {selectedCaseFile ? 'AI Case File Generated' : 'Generate AI Case File'}
+                      </button>
+                    </div>
                   </div>
 
                   {pipeline && pipeline.claimId === selectedClaim.id && (
                     <div className="agent-pipeline">
-                      <p className="summary__label">AI pipeline running</p>
+                      <div className="agent-pipeline__top">
+                        <div className="agent-ai-graphic" aria-hidden="true">
+                          <div className="agent-ai-graphic__ring" />
+                          <div className="agent-ai-graphic__core">AI</div>
+                          <div className="agent-ai-graphic__dot agent-ai-graphic__dot--one" />
+                          <div className="agent-ai-graphic__dot agent-ai-graphic__dot--two" />
+                          <div className="agent-ai-graphic__dot agent-ai-graphic__dot--three" />
+                          <div className="agent-ai-graphic__scan" />
+                        </div>
+                        <div>
+                          <p className="summary__label">AI pipeline running</p>
+                          <p className="muted">Building case file package...</p>
+                        </div>
+                      </div>
                       <ol>
                         {AI_CASE_PIPELINE_STEPS.map((step, index) => (
                           <li
@@ -828,6 +1148,144 @@ export default function AgentReview() {
 
                   {!selectedCaseFile && !pipeline && (
                     <p className="muted">Generate the AI Case File to produce one complete recommendation package.</p>
+                  )}
+
+                  {selectedCaseFile && isEditingCaseFile && (
+                    <div className="agent-card agent-card--inline">
+                      <div className="agent-section__header">
+                        <h3>Edit AI Case File Fields</h3>
+                        <button type="button" className="button button--primary" onClick={handleSaveCaseFileEdits}>
+                          Save AI Field Edits
+                        </button>
+                      </div>
+                      <div className="human-review-grid">
+                        <label className="agent-field">
+                          <span>Impacted areas (comma-separated)</span>
+                          <input
+                            type="text"
+                            className="agent-input"
+                            value={caseFileEditDraft.impactedAreas}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({ ...current, impactedAreas: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <label className="agent-field">
+                          <span>Severity confidence (%)</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="agent-input"
+                            value={caseFileEditDraft.severityConfidence}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({ ...current, severityConfidence: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <label className="agent-field">
+                          <span>Next step</span>
+                          <select
+                            className="agent-input"
+                            value={caseFileEditDraft.nextStep}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({
+                                ...current,
+                                nextStep: event.target.value as AgentCaseNextStep,
+                              }))
+                            }
+                          >
+                            <option value="">Select next step</option>
+                            <option value="Tow">Tow</option>
+                            <option value="Repair">Repair</option>
+                            <option value="Inspection">Inspection</option>
+                          </select>
+                        </label>
+                        <label className="agent-field">
+                          <span>Next step confidence (%)</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="agent-input"
+                            value={caseFileEditDraft.nextStepConfidence}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({ ...current, nextStepConfidence: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <label className="agent-field">
+                          <span>Estimate total (USD)</span>
+                          <input
+                            type="number"
+                            min={0}
+                            className="agent-input"
+                            value={caseFileEditDraft.estimateTotal}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({ ...current, estimateTotal: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <div className="human-review-grid__duration">
+                          <label className="agent-field">
+                            <span>Duration min (days)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              className="agent-input"
+                              value={caseFileEditDraft.durationMin}
+                              onChange={(event) =>
+                                setCaseFileEditDraft((current) => ({ ...current, durationMin: event.target.value }))
+                              }
+                            />
+                          </label>
+                          <label className="agent-field">
+                            <span>Duration max (days)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              className="agent-input"
+                              value={caseFileEditDraft.durationMax}
+                              onChange={(event) =>
+                                setCaseFileEditDraft((current) => ({ ...current, durationMax: event.target.value }))
+                              }
+                            />
+                          </label>
+                        </div>
+                        <label className="agent-field">
+                          <span>Final recommendation</span>
+                          <select
+                            className="agent-input"
+                            value={caseFileEditDraft.finalRecommendation}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({
+                                ...current,
+                                finalRecommendation: event.target.value as AgentCaseDecision,
+                              }))
+                            }
+                          >
+                            <option value="">Select recommendation</option>
+                            <option value="Authorize">Authorize</option>
+                            <option value="Needs More Photos">Needs More Photos</option>
+                            <option value="Escalate">Escalate</option>
+                          </select>
+                        </label>
+                        <label className="agent-field">
+                          <span>Recommendation explanation</span>
+                          <textarea
+                            className="agent-textarea"
+                            rows={2}
+                            value={caseFileEditDraft.recommendationExplanation}
+                            onChange={(event) =>
+                              setCaseFileEditDraft((current) => ({
+                                ...current,
+                                recommendationExplanation: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+                    </div>
                   )}
 
                   {selectedCaseFile && (
@@ -894,9 +1352,20 @@ export default function AgentReview() {
                         )}
                         <div className="agent-line-items">
                           {selectedCaseFile.similarClaims.matches.map((match) => (
-                            <p key={match.id}>
-                              {match.vehicleMake} {match.vehicleModel} / {match.severity} / {formatCurrency(match.finalRepairCost)}
-                            </p>
+                            <button
+                              key={match.id}
+                              type="button"
+                              className="agent-similar-row"
+                              onClick={() => setSelectedSimilarClaim(match)}
+                            >
+                              <p>
+                                {match.vehicleMake} {match.vehicleModel} / {match.severity} /{' '}
+                                {formatCurrency(match.finalRepairCost)}
+                              </p>
+                              <span className="agent-match-score">
+                                Match score: {Math.round((match.score / highestSimilarMatchScore) * 100)}%
+                              </span>
+                            </button>
                           ))}
                         </div>
                       </article>
@@ -976,15 +1445,18 @@ export default function AgentReview() {
                         </label>
 
                         <label className="agent-field">
-                          <span>Final estimate total</span>
-                          <input
-                            type="number"
-                            min={0}
-                            className="agent-input"
-                            value={reviewEstimateTotal}
-                            onChange={(event) => setReviewEstimateTotal(event.target.value)}
-                            disabled={isReadOnly}
-                          />
+                          <span>Final estimate total (USD)</span>
+                          <div className="agent-input-currency">
+                            <span className="agent-input-currency__prefix">$</span>
+                            <input
+                              type="number"
+                              min={0}
+                              className="agent-input"
+                              value={reviewEstimateTotal}
+                              onChange={(event) => setReviewEstimateTotal(event.target.value)}
+                              disabled={isReadOnly}
+                            />
+                          </div>
                         </label>
 
                         <div className="human-review-grid__duration">
@@ -1075,7 +1547,10 @@ export default function AgentReview() {
                     </div>
 
                     <div className="agent-card">
-                      <h2>Decision</h2>
+                      <div className="agent-section__header">
+                        <h2>Decision Workspace</h2>
+                        <span className="summary__label">Human Final Authority</span>
+                      </div>
 
                       <div className="agent-disclosure">
                         AI provides recommendations. Human agent is accountable for the final decision.
@@ -1087,69 +1562,107 @@ export default function AgentReview() {
                           Photos.
                         </div>
                       )}
+                      {decisionLocked && (
+                        <div className="agent-banner" role="status">
+                          Decision finalized on {formatDateTime(selectedClaim.agentDecision?.decisionConfirmedAt)}. Changes are locked.
+                        </div>
+                      )}
 
-                      <p className="muted">
-                        Default recommendation: <strong>{humanDecisionLabel(defaultDecision)}</strong>
-                      </p>
+                      <div className="agent-decision-workspace">
+                        <div className="agent-decision-main">
+                          <div className="agent-decision-context">
+                            <p className="summary__label">AI Recommended Decision</p>
+                            <p>
+                              <strong>{humanDecisionLabel(defaultDecision)}</strong>
+                              {' '}
+                              ({formatConfidence(selectedCaseFile.finalRecommendation.confidence)})
+                            </p>
+                            <p className="muted">{selectedCaseFile.finalRecommendation.explanation}</p>
+                          </div>
 
-                      <div className="agent-decision-options">
-                        {DECISION_OPTIONS.map((option) => (
-                          <label key={option.value} className="agent-radio">
+                          <div className="agent-decision-cards">
+                            {DECISION_OPTIONS.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className={`agent-decision-card ${selectedDecision === option.value ? 'is-active' : ''}`}
+                                onClick={() => setSelectedDecision(option.value)}
+                                disabled={isReadOnly || decisionLocked}
+                              >
+                                <p className="agent-decision-card__title">{option.label}</p>
+                                <p className="muted">
+                                  {option.value === 'Authorize'
+                                    ? 'Authorize now and move claim to final authorized state.'
+                                    : option.value === 'Needs More Photos'
+                                      ? 'Pause decision and request additional documentation.'
+                                      : 'Route to senior adjuster with pending approval status.'}
+                                </p>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="agent-decision-side">
+                          <div className="agent-decision-sequence">
+                            <p className="summary__label">Pre-Decision Checklist</p>
+                            <p>{selectedCaseFile ? '1. AI Case File ready' : '1. Generate AI Case File'}</p>
+                            <p>{reviewInputsComplete ? '2. Human review complete' : '2. Complete Human Review'}</p>
+                            <p>{reviewedConfirmation ? '3. Review confirmed' : '3. Confirm review checkbox'}</p>
+                            {decisionRequiresReason && (
+                              <p>{hasDecisionReason ? '4. Decision rationale added' : '4. Add rationale for AI deviation'}</p>
+                            )}
+                          </div>
+
+                          <label className="agent-checkbox">
                             <input
-                              type="radio"
-                              name="agent-decision"
-                              value={option.value}
-                              checked={selectedDecision === option.value}
-                              onChange={() => setSelectedDecision(option.value)}
-                              disabled={isReadOnly}
+                              type="checkbox"
+                              checked={reviewedConfirmation}
+                              onChange={(event) => setReviewedConfirmation(event.target.checked)}
+                              disabled={isReadOnly || decisionLocked}
                             />
-                            <span>{option.label}</span>
+                            <span>Reviewed AI Case File and changes</span>
                           </label>
-                        ))}
-                      </div>
 
-                      <label className="agent-checkbox">
-                        <input
-                          type="checkbox"
-                          checked={reviewedConfirmation}
-                          onChange={(event) => setReviewedConfirmation(event.target.checked)}
-                          disabled={isReadOnly}
-                        />
-                        <span>Reviewed AI Case File and changes</span>
-                      </label>
+                          {decisionRequiresReason && (
+                            <label className="agent-field">
+                              <span>Reason for decision change</span>
+                              <textarea
+                                className="agent-textarea"
+                                rows={2}
+                                value={decisionReason}
+                                onChange={(event) => setDecisionReason(event.target.value)}
+                                disabled={isReadOnly || decisionLocked}
+                                placeholder="Why does your final decision differ from the AI recommendation?"
+                              />
+                            </label>
+                          )}
 
-                      <div className="agent-actions">
-                        <button
-                          type="button"
-                          className={`button ${selectedDecision === 'Authorize' ? 'button--primary' : 'button--ghost'}`}
-                          onClick={() => handleDecisionAction('Authorize')}
-                          disabled={isReadOnly}
-                        >
-                          Authorize Repairs (simulated)
-                        </button>
-                        <button
-                          type="button"
-                          className={`button ${selectedDecision === 'Needs More Photos' ? 'button--primary' : 'button--ghost'}`}
-                          onClick={() => handleDecisionAction('Needs More Photos')}
-                          disabled={isReadOnly}
-                        >
-                          Request More Photos
-                        </button>
-                        <button
-                          type="button"
-                          className={`button ${selectedDecision === 'Escalate' ? 'button--primary' : 'button--ghost'}`}
-                          onClick={() => handleDecisionAction('Escalate')}
-                          disabled={isReadOnly}
-                        >
-                          Escalate to Senior Adjuster (simulated)
-                        </button>
+                          <div className="agent-decision-preview">
+                            <p className="summary__label">Selected outcome</p>
+                            <p>
+                              {humanDecisionLabel(selectedDecision)}
+                              {' -> '}
+                              <strong>{decisionOutcomeStatus}</strong>
+                            </p>
+                            <p className="muted">{decisionOutcomeDetail}</p>
+                          </div>
+
+                          <button
+                            type="button"
+                            className="button button--primary"
+                            onClick={handleDecisionAction}
+                            disabled={isReadOnly || decisionLocked || !decisionReadyToApply}
+                          >
+                            {decisionLocked ? 'Decision Finalized' : 'Apply Selected Decision'}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </>
                 )}
 
                 <div className="agent-card">
-                  <h2>Activity Timeline</h2>
+                  <h2>Case Log</h2>
                   <div className="agent-timeline">
                     {[...selectedClaim.events]
                       .sort((left, right) => new Date(right.at).getTime() - new Date(left.at).getTime())
@@ -1168,6 +1681,80 @@ export default function AgentReview() {
             )}
           </section>
         </section>
+        {selectedSimilarClaim && (
+          <div
+            className="agent-modal-backdrop"
+            role="presentation"
+            onClick={() => setSelectedSimilarClaim(null)}
+          >
+            <div
+              className="agent-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Similar claim summary"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="agent-section__header">
+                <h2>Similar Claim Summary</h2>
+                <button
+                  type="button"
+                  className="button button--ghost"
+                  onClick={() => setSelectedSimilarClaim(null)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="agent-case-writeup">
+                <p className="summary__label">Case Summary</p>
+                <p>
+                  This historical case involved a <strong>{selectedSimilarClaim.severity}</strong> severity impact on{' '}
+                  <strong>{selectedSimilarClaim.damageAreas.join(', ')}</strong> for a{' '}
+                  <strong>
+                    {selectedSimilarClaim.vehicleMake} {selectedSimilarClaim.vehicleModel}
+                  </strong>
+                  . Final repair cost settled at <strong>{formatCurrency(selectedSimilarClaim.finalRepairCost)}</strong>{' '}
+                  with an estimated repair cycle of <strong>{selectedSimilarClaim.repairDurationDays} days</strong>.
+                </p>
+                <p className="muted">
+                  Use this as a reference point to sanity-check scope, pricing, and turnaround expectations against the
+                  current claim.
+                </p>
+              </div>
+              <div className="summary-grid">
+                <div>
+                  <span className="summary__label">Claim Id</span>
+                  <span className="summary__value">{selectedSimilarClaim.id}</span>
+                </div>
+                <div>
+                  <span className="summary__label">Vehicle</span>
+                  <span className="summary__value">
+                    {selectedSimilarClaim.vehicleMake} {selectedSimilarClaim.vehicleModel}
+                  </span>
+                </div>
+                <div>
+                  <span className="summary__label">Severity</span>
+                  <span className="summary__value">{selectedSimilarClaim.severity}</span>
+                </div>
+                <div>
+                  <span className="summary__label">Impacted Areas</span>
+                  <span className="summary__value">{selectedSimilarClaim.damageAreas.join(', ')}</span>
+                </div>
+                <div>
+                  <span className="summary__label">Final Repair Cost</span>
+                  <span className="summary__value">{formatCurrency(selectedSimilarClaim.finalRepairCost)}</span>
+                </div>
+                <div>
+                  <span className="summary__label">Repair Duration</span>
+                  <span className="summary__value">{selectedSimilarClaim.repairDurationDays} days</span>
+                </div>
+                <div>
+                  <span className="summary__label">Match Score</span>
+                  <span className="summary__value">{selectedSimilarClaimScorePercent}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
